@@ -1,3 +1,10 @@
 .*.swp
 *.o
 *.json
+hifiasm
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.ovlp.paf
+*.candidates.paf

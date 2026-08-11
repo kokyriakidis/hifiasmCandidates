@@ -6324,7 +6324,7 @@ void print_ov_dbg_paf(FILE *fp, char *ref_str, char *ref_id, int32_t ref_id_n, c
 
 static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback for kt_pipeline()
 {
-    cal_ec_r_dbg_t *p = (cal_ec_r_dbg_t*)data; char cm[4]; cm[0] = 'M'; cm[1] = 'M'; cm[2] = 'I'; cm[3] = 'D'; 
+    cal_ec_r_dbg_t *p = (cal_ec_r_dbg_t*)data; char cm[4]; cm[0] = '='; cm[1] = 'X'; cm[2] = 'I'; cm[3] = 'D'; ///op0=match('='), op1=mismatch('X'), op2=ins('I'), op3=del('D')
     // cal_ec_r_dbg_step_t
     if (step == 0) { // step 1: read a block of sequences
         cal_ec_r_dbg_step_t *s; CALLOC(s, 1);
