@@ -94,149 +94,48 @@ double Get_T(void)
 
 void Print_H(hifiasm_opt_t* asm_opt)
 {
+    // This build is stripped to the initial candidate-overlap-detection stage
+    // (+ optional base-level alignment/filter); the error-correction, assembly,
+    // trio/Hi-C phasing, purge-dups, scaffolding and telomere stages of the
+    // original hifiasm are not built, so only the overlap-relevant options are
+    // documented here.
     fprintf(stderr, "Usage: hifiasm [options] <in_1.fq> <in_2.fq> <...>\n");
+    fprintf(stderr, "Detect candidate overlaps and write them as PAF.\n");
     fprintf(stderr, "Options:\n");
 	fprintf(stderr, "  Input/Output:\n");
     fprintf(stderr, "    -o STR       prefix of output files [%s]\n", asm_opt->output_file_name);
+    fprintf(stderr, "                 overlaps are written to <prefix>.ovlp.paf\n");
+    fprintf(stderr, "                 (or <prefix>.candidates.paf with --dbg-ovec)\n");
     fprintf(stderr, "    -t INT       number of threads [%d]\n", asm_opt->thread_num);
     fprintf(stderr, "    -h           show help information\n");
     fprintf(stderr, "    --version    show version number\n");
     fprintf(stderr, "  Preset options:\n");
-    fprintf(stderr, "    --ont        assemble Oxford Nanopore reads\n");
-	fprintf(stderr, "  Overlap/Error correction:\n");
+    fprintf(stderr, "    --ont        overlap Oxford Nanopore reads\n");
+	fprintf(stderr, "  Overlap detection:\n");
     fprintf(stderr, "    -k INT       k-mer length (must be <64) [%d]\n", asm_opt->k_mer_length);
 	fprintf(stderr, "    -w INT       minimizer window size [%d]\n", asm_opt->mz_win);
 	fprintf(stderr, "    -f INT       number of bits for bloom filter; 0 to disable [%d]\n", asm_opt->bf_shift);
 	fprintf(stderr, "    -D FLOAT     drop k-mers occurring >FLOAT*coverage times [%.1f]\n", asm_opt->high_factor);
 	fprintf(stderr, "    -N INT       consider up to max(-D*coverage,-N) overlaps for each oriented read [%d]\n", asm_opt->max_n_chain);
-    fprintf(stderr, "    -r INT       round of correction [%d]\n", asm_opt->number_of_round);
-    fprintf(stderr, "    -z INT       length of adapters that should be removed [%d]\n", asm_opt->adapterLen);
+    fprintf(stderr, "    --max-od-ec  FLOAT\n");
+    fprintf(stderr, "                 max overlap error rate for candidate detection [%.3g]\n", asm_opt->max_ov_diff_ec);
+    fprintf(stderr, "    --max-od-final FLOAT\n");
+    fprintf(stderr, "                 max overlap error rate after base-level alignment [%.3g]\n", asm_opt->max_ov_diff_final);
     fprintf(stderr, "    --max-kocc   INT\n");
     fprintf(stderr, "                 employ k-mers occurring <INT times to rescue repetitive overlaps [%d]\n", asm_opt->max_kmer_cnt);
     fprintf(stderr, "    --hg-size    INT(k, m or g)\n");
     fprintf(stderr, "                 estimated haploid genome size used for inferring read coverage [auto]\n");
-    fprintf(stderr, "  Assembly:\n");
-    fprintf(stderr, "    -a INT       round of assembly cleaning [%d]\n", asm_opt->clean_round);
-    fprintf(stderr, "    -m INT       pop bubbles of <INT in size in contig graphs [%lld]\n", asm_opt->large_pop_bubble_size);
-    fprintf(stderr, "    -p INT       pop bubbles of <INT in size in unitig graphs [%lld]\n", asm_opt->small_pop_bubble_size);
-    fprintf(stderr, "    -n INT       remove tip unitigs composed of <=INT reads [%d]\n", asm_opt->max_short_tip);
-    fprintf(stderr, "    -x FLOAT     max overlap drop ratio [%.2g]\n", asm_opt->max_drop_rate);
-    fprintf(stderr, "    -y FLOAT     min overlap drop ratio [%.2g]\n", asm_opt->min_drop_rate);
-    fprintf(stderr, "    -i           ignore saved read correction and overlaps\n");
-    fprintf(stderr, "    -u           post-join step for contigs which may improve N50; 0 to disable; 1 to enable\n");
-    fprintf(stderr, "                 [%u] and [%u] in default for the UL+HiFi assembly and the HiFi assembly, respectively\n",
-                                      asm_opt->ul_pst_join, asm_opt->hifi_pst_join);
     fprintf(stderr, "    --hom-cov    INT\n");
     fprintf(stderr, "                 homozygous read coverage [auto]\n");
-    fprintf(stderr, "    --lowQ       INT\n");
-    fprintf(stderr, "                 output contig regions with >=INT%% inconsistency in BED format; 0 to disable [%d]\n", asm_opt->bed_inconsist_rate);
-    fprintf(stderr, "    --b-cov      INT\n");
-    fprintf(stderr, "                 break contigs at positions with <INT-fold coverage; work with '--m-rate'; 0 to disable [%d]\n", asm_opt->b_low_cov);
-    fprintf(stderr, "    --h-cov      INT\n");
-    fprintf(stderr, "                 break contigs at positions with >INT-fold coverage; work with '--m-rate'; -1 to disable [%d]\n", asm_opt->b_high_cov);
-    fprintf(stderr, "    --m-rate     FLOAT\n");
-    fprintf(stderr, "                 break contigs at positions with <=FLOAT*coverage exact overlaps;\n");
-    fprintf(stderr, "                 only work with '--b-cov' or '--h-cov'[%.2f]\n", asm_opt->m_rate);
-    fprintf(stderr, "    --primary    output a primary assembly and an alternate assembly\n");
-    fprintf(stderr, "    --ctg-n      INT\n");
-    fprintf(stderr, "                 remove tip contigs composed of <=INT reads [%d]\n", asm_opt->max_contig_tip);
-    
-    
-//	fprintf(stderr, "    --pri-range INT1[,INT2]\n");
-//	fprintf(stderr, "                keep contigs with coverage in this range in p_ctg.gfa; -1 to disable [auto,inf]\n");
-
-    fprintf(stderr, "  Trio-partition:\n");
-    fprintf(stderr, "    -1 FILE      hap1/paternal k-mer dump generated by \"yak count\" []\n");
-    fprintf(stderr, "    -2 FILE      hap2/maternal k-mer dump generated by \"yak count\" []\n");
-    fprintf(stderr, "    -3 FILE      list of hap1/paternal read names []\n");
-	fprintf(stderr, "    -4 FILE      list of hap2/maternal read names []\n");
-    fprintf(stderr, "    -c INT       lower bound of the binned k-mer's frequency [%d]\n", asm_opt->min_cnt);
-    fprintf(stderr, "    -d INT       upper bound of the binned k-mer's frequency [%d]\n", asm_opt->mid_cnt);
-    fprintf(stderr, "    --t-occ      INT\n");
-    fprintf(stderr, "                 forcedly remove unitigs with >INT unexpected haplotype-specific reads;\n");
-    fprintf(stderr, "                 ignore graph topology; [%d]\n", asm_opt->trio_flag_occ_thres);
-    fprintf(stderr, "    --trio-dual  utilize homology information to correct trio phasing errors\n");
-
-
-    fprintf(stderr, "  Purge-dups:\n");
-    fprintf(stderr, "    -l INT       purge level. 0: no purging; 1: light; 2/3: aggressive [0 for trio; 3 for unzip]\n");
-    fprintf(stderr, "    -s FLOAT     similarity threshold for duplicate haplotigs in read-level [%g for -l1/-l2, %g for -l3]\n", 
-                                      asm_opt->purge_simi_rate_l2, asm_opt->purge_simi_rate_l3);
-    fprintf(stderr, "    -O INT       min number of overlapped reads for duplicate haplotigs [%d]\n", 
-                                      asm_opt->purge_overlap_len);
-    fprintf(stderr, "    --purge-max  INT\n");
-    fprintf(stderr, "                 coverage upper bound of Purge-dups [auto]\n");
-    fprintf(stderr, "    --n-hap      INT\n");
-    fprintf(stderr, "                 number of haplotypes [%d]\n", asm_opt->polyploidy);
-    
-    // fprintf(stderr, "  Hi-C-partition [experimental, not stable]:\n");
-    fprintf(stderr, "  Hi-C-partition:\n");
-    fprintf(stderr, "    --h1 FILEs   file names of Hi-C R1  [r1_1.fq,r1_2.fq,...]\n");
-    fprintf(stderr, "    --h2 FILEs   file names of Hi-C R2  [r2_1.fq,r2_2.fq,...]\n");
-    fprintf(stderr, "    --seed INT   RNG seed [%lu]\n", asm_opt->seed);
-    fprintf(stderr, "    --s-base     FLOAT\n");
-	fprintf(stderr, "                 similarity threshold for homology detection in base-level;\n"); 
-    fprintf(stderr, "                 -1 to disable [%.3g]; -s for read-level (see <Purge-dups>)\n", asm_opt->trans_base_rate_sec);
-    
-    fprintf(stderr, "    --n-weight   INT\n");
-    fprintf(stderr, "                 rounds of reweighting Hi-C links [%d]\n", asm_opt->n_weight);
-	fprintf(stderr, "    --n-perturb  INT\n");
-    fprintf(stderr, "                 rounds of perturbation [%d]\n", asm_opt->n_perturb);
-    fprintf(stderr, "    --f-perturb  FLOAT\n");
-	fprintf(stderr, "                 fraction to flip for perturbation [%.3g]\n", asm_opt->f_perturb);
-    fprintf(stderr, "    --l-msjoin   INT\n");
-    fprintf(stderr, "                 detect misjoined unitigs of >=INT in size; 0 to disable [%lu]\n", asm_opt->misjoin_len);
-
-    fprintf(stderr, "  Ultra-Long-integration:\n");
-    fprintf(stderr, "    --ul FILEs   file names of Ultra-Long reads [r1.fq,r2.fq,...]\n");
-    ///pending for integration
-    /**
-    fprintf(stderr, "    --ul-m       INT\n");
-    fprintf(stderr, "                 hybrid assembly mode. 0: fast and memory efficent; 1: may produce better assembly with ONT R10 [%d]\n", asm_opt->ul_mod);
-    **/
-    fprintf(stderr, "    --ul-rate    FLOAT\n");
-    fprintf(stderr, "                 error rate of Ultra-Long reads [%.3g]\n", asm_opt->ul_error_rate);
-    fprintf(stderr, "    --ul-tip     INT\n");
-    fprintf(stderr, "                 remove tip unitigs composed of <=INT reads for the UL assembly [%d]\n", asm_opt->max_short_ul_tip);
-    fprintf(stderr, "    --path-max   FLOAT\n");
-    fprintf(stderr, "                 max path drop ratio [%.2g]; higher number may make the assembly cleaner\n", asm_opt->max_path_drop_rate);
-    fprintf(stderr, "                 but may lead to more misassemblies\n");
-    fprintf(stderr, "    --path-min   FLOAT\n");
-    fprintf(stderr, "                 min path drop ratio [%.2g]; higher number may make the assembly cleaner\n", asm_opt->min_path_drop_rate);
-    fprintf(stderr, "                 but may lead to more misassemblies\n");
-    fprintf(stderr, "    --ul-cut     INT\n");
-    fprintf(stderr, "                 filter out <INT UL reads during the UL assembly [%d]\n", asm_opt->ul_min_base);
-    // fprintf(stderr, "    --low-het    enable it for genomes with very low het heterozygosity rate (<0.0001%%)\n");
-
-    fprintf(stderr, "  Dual-Scaffolding:\n");
-    fprintf(stderr, "    --dual-scaf  output scaffolding\n");
-    fprintf(stderr, "    --scaf-gap   INT\n");
-    fprintf(stderr, "                 max gap size for scaffolding [%ld]\n", asm_opt->self_scaf_gap_max);
-
-    fprintf(stderr, "  Telomere-identification:\n");
-    fprintf(stderr, "    --telo-m     STR\n");
-    fprintf(stderr, "                 telomere motif at 5'-end; CCCTAA for human [%s]\n", ((asm_opt->telo_motif)?(asm_opt->telo_motif):("NULL")));///5'-end, check CCCTAA
-    fprintf(stderr, "    --telo-p     INT\n");
-    fprintf(stderr, "                 non-telomeric penalty [%ld]\n", asm_opt->telo_pen);
-    fprintf(stderr, "    --telo-d     INT\n");
-    fprintf(stderr, "                 max drop [%ld]\n", asm_opt->telo_drop);
-    fprintf(stderr, "    --telo-s     INT\n");
-    fprintf(stderr, "                 min score for telomere reads [%ld]\n", asm_opt->telo_mic_sc);
-
-    fprintf(stderr, "  ONT simplex assembly (beta):\n");
-    fprintf(stderr, "    --ont        assemble ONT simplex reads in fastq format\n");
-    // fprintf(stderr, "    --sc-n       consider base qual value for assembly\n");
-    fprintf(stderr, "    --chem-c     INT\n");
-    fprintf(stderr, "                 detect chimeric reads with <=INT other reads support [%lu]\n", asm_opt->chemical_cov);
-    fprintf(stderr, "    --chem-f     INT\n");
-    fprintf(stderr, "                 length of flanking regions for chimeric read detection [%lu]\n", asm_opt->chemical_flank);
+    fprintf(stderr, "    --dbg-ovec   emit the raw pre-alignment candidate set (<prefix>.candidates.paf)\n");
+    fprintf(stderr, "                 instead of alignment-filtered overlaps\n");
+    fprintf(stderr, "  ONT read filtering (with --ont):\n");
     fprintf(stderr, "    --rl-cut     INT\n");
-    fprintf(stderr, "                 filter out ONT simplex reads shorter than <INT> for assembly [%ld]\n", asm_opt->rl_cut);
+    fprintf(stderr, "                 filter out ONT simplex reads shorter than <INT> [%ld]\n", asm_opt->rl_cut);
     fprintf(stderr, "    --sc-cut     INT\n");
     fprintf(stderr, "                 filter out ONT simplex reads with a mean base quality score below <INT> [%ld]\n", asm_opt->sc_cut);
 
-
-    fprintf(stderr, "Example: ./hifiasm -o NA12878.asm -t 32 NA12878.fq.gz\n");
+    fprintf(stderr, "Example: ./hifiasm -o reads.asm -t 32 reads.fq.gz\n");
     fprintf(stderr, "See `https://hifiasm.readthedocs.io/en/latest/' or `man ./hifiasm.1' for complete documentation.\n");
 }
 

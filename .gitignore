@@ -1,7 +1,9 @@
 .*.swp
 *.o
+*.a
 *.json
 hifiasm
+build/
 *.fastq
 *.fastq.gz
 *.fq

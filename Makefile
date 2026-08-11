@@ -4,15 +4,16 @@ CC=			gcc
 # the unused error-correction / consensus / phasing code that lives alongside
 # the base-level alignment path in Correct.cpp and ecovlp.cpp, so only the
 # candidate-detection + alignment-filter functions are kept in the binary.
-CXXFLAGS=	-g -O3 -msse4.2 -mpopcnt -fomit-frame-pointer -Wall -ffunction-sections -fdata-sections
+CXXFLAGS=	-g -O3 -msse4.2 -mpopcnt -fomit-frame-pointer -Wall -fPIC -ffunction-sections -fdata-sections
 CFLAGS=		$(CXXFLAGS)
 CPPFLAGS=
 INCLUDES=
 LDFLAGS=	-Wl,--gc-sections
 OBJS=		CommandLines.o Process_Read.o Hash_Table.o \
 			kthread.o htab.o hist.o sketch.o anchor.o extract.o sys.o \
-			kalloc.o Correct.o ecovlp.o candidates.o
+			kalloc.o Correct.o ecovlp.o candidates.o hifiasm_overlaps.o
 EXE=		hifiasm
+LIB=		libhifiasm_overlaps.a
 LIBS=		-lz -lpthread -lm
 
 ifneq ($(asan),)
@@ -33,6 +34,14 @@ all:$(EXE)
 
 $(EXE):$(OBJS) main.o
 		$(CXX) $(CXXFLAGS) $(LDFLAGS) $^ -o $@ $(LIBS)
+
+# Static library exposing the hifiasm_overlaps.h C API (no CLI main), for
+# linking into other programs such as dinara. $(OBJS) already includes
+# hifiasm_overlaps.o and excludes main.o.
+lib:$(LIB)
+
+$(LIB):$(OBJS)
+		$(AR) rcs $@ $^
 
 clean:
 		rm -fr gmon.out *.o a.out $(EXE) *~ *.a *.dSYM

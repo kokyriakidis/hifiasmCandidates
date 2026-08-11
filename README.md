@@ -1,3 +1,130 @@
+# hifiasm — candidate overlap detector (stripped fork)
+
+This is a reduced fork of [hifiasm](https://github.com/chhylp123/hifiasm) that
+keeps only the **initial candidate overlap detection** stage (plus the optional
+base-level alignment/filter). Error correction, assembly, trio/Hi-C phasing,
+purge-dups, scaffolding and telomere identification have been removed from the
+program flow. The result is a small tool — and an embeddable library — that
+takes reads and emits read-to-read overlaps as PAF.
+
+It can be used two ways:
+
+1. As a **command-line tool** (`hifiasm`), and
+2. As a **static library** (`libhifiasm_overlaps.a`) linked into another program
+   (e.g. dinara) via the C API in [`hifiasm_overlaps.h`](hifiasm_overlaps.h).
+
+## Output
+
+Overlaps are written to `<prefix>.ovlp.paf`. CIGARs use the extended `=`/`X`
+convention and are carried in the `cg:Z:` tag (`=` match, `X` mismatch,
+`I` insertion, `D` deletion). With `--dbg-ovec` the raw pre-alignment candidate
+set is written to `<prefix>.candidates.paf` instead (no base-level alignment,
+so non-aligning candidates are not dropped).
+
+## Building
+
+### Make (executable)
+
+```sh
+make            # builds ./hifiasm
+make lib        # builds libhifiasm_overlaps.a (static library, PIC)
+```
+
+### CMake (library + executable)
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+# build/hifiasm                 (CLI, disable with -DHIFIASM_OVERLAPS_BUILD_EXE=OFF)
+# build/libhifiasm_overlaps.a   (static library)
+```
+
+## Command-line usage
+
+```sh
+# HiFi reads -> reads.ovlp.paf
+./hifiasm -o reads -t32 reads.fq.gz
+
+# Oxford Nanopore reads
+./hifiasm -o reads --ont -t32 reads.fq.gz
+
+# raw pre-alignment candidates -> reads.candidates.paf
+./hifiasm -o reads -t32 --dbg-ovec reads.fq.gz
+```
+
+Run `./hifiasm -h` for the full list of overlap-relevant options.
+
+## Using it as a library / git submodule
+
+Add this repository as a submodule of your project:
+
+```sh
+git submodule add https://github.com/kokyriakidis/hifiasmCandidates external/hifiasmCandidates
+git submodule update --init --recursive
+```
+
+### With CMake (recommended)
+
+`add_subdirectory` and link the `hifiasm_overlaps` target. It propagates its
+include directory, the required system libraries, and the `--gc-sections` link
+flag automatically:
+
+```cmake
+add_subdirectory(external/hifiasmCandidates)
+target_link_libraries(your_target PRIVATE hifiasm_overlaps)
+```
+
+If you only want the library (no CLI executable):
+
+```cmake
+set(HIFIASM_OVERLAPS_BUILD_EXE OFF CACHE BOOL "" FORCE)
+add_subdirectory(external/hifiasmCandidates)
+```
+
+### Linking the static library by hand
+
+If you build with `make lib` and link manually, you **must** pass
+`-Wl,--gc-sections`. The overlap code path references (but never calls) symbols
+from the removed error-correction/assembly code; `--gc-sections` lets the linker
+drop those unused sections so the final link succeeds:
+
+```sh
+g++ -Wl,--gc-sections your_app.o \
+    external/hifiasmCandidates/libhifiasm_overlaps.a \
+    -lz -lpthread -lm -o your_app
+```
+
+### C API
+
+Include [`hifiasm_overlaps.h`](hifiasm_overlaps.h) and call
+`hifiasm_detect_overlaps()`. It builds an argv equivalent to the CLI, so all
+presets, coverage inference and validation behave exactly like the tool, runs
+the pipeline, and returns the path of the written PAF for you to parse:
+
+```c
+#include "hifiasm_overlaps.h"
+
+const char *reads[] = { "reads.fq.gz" };
+hifiasm_ovlp_opt_t opt = {0};       /* zero-init; 0 fields fall back to defaults */
+opt.threads = 32;
+/* opt.is_ont = 1;         for Nanopore reads                     */
+/* opt.raw_candidates = 1; for the pre-alignment candidate set    */
+
+char *paf = NULL;
+if (hifiasm_detect_overlaps(reads, 1, "reads", &opt, &paf) == 0) {
+    /* parse `paf` (== "reads.ovlp.paf"), then: */
+    free(paf);
+}
+```
+
+The routine uses hifiasm's process-global state and is **not thread-safe**: do
+not call it concurrently from multiple threads. It may be called sequentially
+multiple times in one process.
+
+---
+
+The original hifiasm documentation follows.
+
 ## <a name="started"></a>Getting Started
 
 ```sh
