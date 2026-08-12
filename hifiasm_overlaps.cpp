@@ -122,17 +122,47 @@ static int cmp_minimizer_by_pos(const void *pa, const void *pb)
     return 0;
 }
 
-int hifiasm_sketch_minimizers(const char *seq,
-                              int len,
-                              int w,
-                              int k,
-                              int is_hpc,
-                              hifiasm_minimizer_t **out_mz,
-                              int *out_n)
+/*
+ * Reusable sketch context. Keeps the sketcher scratch (mz, mt) and the
+ * converted-output buffer (out) alive across calls so steady-state sketching
+ * does no per-read allocation once the buffers have grown to fit.
+ */
+struct hifiasm_sketch_ctx_s {
+    ha_mz1_v            mz;    /* raw sketch output (END positions, hashed key) */
+    st_mt_t             mt;    /* mz1_ha_sketch scratch (dereferenced always)   */
+    hifiasm_minimizer_t *out;  /* converted, START-anchored, sorted+deduped     */
+    size_t              out_m; /* capacity of `out` in elements                 */
+};
+
+hifiasm_sketch_ctx_t *hifiasm_sketch_ctx_init(void)
 {
-    if (out_mz) *out_mz = NULL;
-    if (out_n)  *out_n  = 0;
-    if (seq == NULL || out_mz == NULL || out_n == NULL) {
+    hifiasm_sketch_ctx_t *ctx =
+        (hifiasm_sketch_ctx_t*)calloc(1, sizeof(hifiasm_sketch_ctx_t));
+    return ctx; /* NULL on failure is fine; callers check. */
+}
+
+void hifiasm_sketch_ctx_destroy(hifiasm_sketch_ctx_t *ctx)
+{
+    if (ctx == NULL) return;
+    /* mz.a / mt.a were grown by mz1_ha_sketch with km=NULL -> stdlib malloc. */
+    free(ctx->mz.a);
+    free(ctx->mt.a);
+    free(ctx->out);
+    free(ctx);
+}
+
+/*
+ * Core sketch into ctx-owned storage. On success sets *out_mz (pointer into
+ * ctx->out, owned by the ctx) and *out_n. Shared by the context and one-shot
+ * public entry points.
+ */
+static int sketch_into_ctx(hifiasm_sketch_ctx_t *ctx,
+                           const char *seq, int len, int w, int k, int is_hpc,
+                           const hifiasm_minimizer_t **out_mz, int *out_n)
+{
+    *out_mz = NULL;
+    *out_n  = 0;
+    if (seq == NULL) {
         fprintf(stderr, "[hifiasm_sketch_minimizers] invalid arguments\n");
         return 1;
     }
@@ -144,61 +174,127 @@ int hifiasm_sketch_minimizers(const char *seq,
         return 1;
     }
 
-    /* Local sketch buffers. mz1_ha_sketch dereferences `mt` unconditionally,
-     * so it must be a valid (zeroed) st_mt_t; passing km=NULL routes all
-     * kvec allocations through the stdlib allocator, so ->a can be free()d. */
-    ha_mz1_v mz = {0, 0, NULL};
-    st_mt_t  mt = {0, 0, NULL};
+    /* Reuse buffers: reset logical length, keep capacity/pointer. mz1_ha_sketch
+     * appends via kv_push_km and grows only when n exceeds m. */
+    ctx->mz.n = 0;
+    ctx->mt.n = 0;
 
     /* hf=NULL           -> no frequency filter (cnt always 0, nothing dropped)
      * sample_dist=0     -> skips select_mz_h subsampling (needs sample_dist>w)
      * pt=NULL, dp_min_len=-1 -> skips refine_sketch
      * is_unique=0, dp_e=-1, ws ignored without subsampling.
      * So the result depends only on (seq, len, w, k, is_hpc). */
-    mz1_ha_sketch(seq, len, w, k, /*rid*/ 0, is_hpc ? 1 : 0, &mz,
+    mz1_ha_sketch(seq, len, w, k, /*rid*/ 0, is_hpc ? 1 : 0, &ctx->mz,
                   /*hf*/ NULL, /*sample_dist*/ 0, /*k_flag*/ NULL,
                   /*dbg_ct*/ NULL, /*pt*/ NULL, /*min_freq*/ -1,
-                  /*dp_min_len*/ -1, /*dp_e*/ -1.0f, &mt, /*ws*/ w,
+                  /*dp_min_len*/ -1, /*dp_e*/ -1.0f, &ctx->mt, /*ws*/ w,
                   /*is_unique*/ 0, /*km*/ NULL);
 
-    free(mt.a);
+    const uint32_t n = ctx->mz.n;
+    if (n == 0) return 0;
 
-    const uint32_t n = mz.n;
-    if (n == 0) {
-        free(mz.a);
-        return 0;
-    }
-
-    hifiasm_minimizer_t *result =
-        (hifiasm_minimizer_t*)malloc((size_t)n * sizeof(hifiasm_minimizer_t));
-    if (result == NULL) {
-        free(mz.a);
-        fprintf(stderr, "[hifiasm_sketch_minimizers] out of memory\n");
-        return 1;
+    /* Grow the output buffer if needed (keeps capacity across calls). */
+    if ((size_t)n > ctx->out_m) {
+        size_t m = ctx->out_m ? ctx->out_m : 64;
+        while (m < (size_t)n) m <<= 1;
+        hifiasm_minimizer_t *p =
+            (hifiasm_minimizer_t*)realloc(ctx->out, m * sizeof(*p));
+        if (p == NULL) {
+            fprintf(stderr, "[hifiasm_sketch_minimizers] out of memory\n");
+            return 1;
+        }
+        ctx->out = p;
+        ctx->out_m = m;
     }
 
     /* ha_mz1_t stores the END position; convert to START = end + 1 - span.
      * With is_hpc=0, span == k. mz1_ha_sketch never emits a k-mer whose span
      * runs past the sequence, so start >= 0 and start + span <= len hold. */
     for (uint32_t i = 0; i < n; ++i) {
-        const ha_mz1_t *m = &mz.a[i];
+        const ha_mz1_t *m = &ctx->mz.a[i];
         const uint32_t span = (uint32_t)m->span;
         const uint32_t end  = (uint32_t)m->pos;
-        result[i].pos  = end + 1u - span;
-        result[i].span = span;
-        result[i].rev  = (uint32_t)m->rev;
-        result[i].hash = m->x;
+        ctx->out[i].pos  = end + 1u - span;
+        ctx->out[i].span = span;
+        ctx->out[i].rev  = (uint32_t)m->rev;
+        ctx->out[i].hash = m->x;
     }
 
-    free(mz.a);
-
     /* Emitted order follows window scans and is largely position-ordered but
-     * not strictly (identical-minimizer flushes and end handling can inter
-     * leave it slightly out of order). Sort by START so callers get a clean
-     * monotonic list. */
-    qsort(result, n, sizeof(hifiasm_minimizer_t), cmp_minimizer_by_pos);
+     * not strictly (identical-minimizer flushes and end handling can interleave
+     * it). Sort by START for a clean monotonic list. */
+    qsort(ctx->out, n, sizeof(hifiasm_minimizer_t), cmp_minimizer_by_pos);
+
+    /* Deduplicate by START position. Exactly one k-mer starts at any position,
+     * so equal positions are fully identical entries; collapsing them lets the
+     * caller skip its own dedup pass. */
+    uint32_t u = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (u == 0 || ctx->out[i].pos != ctx->out[u - 1].pos) {
+            ctx->out[u++] = ctx->out[i];
+        }
+    }
+
+    *out_mz = ctx->out;
+    *out_n  = (int)u;
+    return 0;
+}
+
+int hifiasm_sketch_minimizers_ctx(hifiasm_sketch_ctx_t *ctx,
+                                  const char *seq,
+                                  int len,
+                                  int w,
+                                  int k,
+                                  int is_hpc,
+                                  const hifiasm_minimizer_t **out_mz,
+                                  int *out_n)
+{
+    if (out_mz) *out_mz = NULL;
+    if (out_n)  *out_n  = 0;
+    if (ctx == NULL || out_mz == NULL || out_n == NULL) {
+        fprintf(stderr, "[hifiasm_sketch_minimizers_ctx] invalid arguments\n");
+        return 1;
+    }
+    return sketch_into_ctx(ctx, seq, len, w, k, is_hpc, out_mz, out_n);
+}
+
+int hifiasm_sketch_minimizers(const char *seq,
+                              int len,
+                              int w,
+                              int k,
+                              int is_hpc,
+                              hifiasm_minimizer_t **out_mz,
+                              int *out_n)
+{
+    if (out_mz) *out_mz = NULL;
+    if (out_n)  *out_n  = 0;
+    if (out_mz == NULL || out_n == NULL) {
+        fprintf(stderr, "[hifiasm_sketch_minimizers] invalid arguments\n");
+        return 1;
+    }
+
+    /* One-shot: sketch into a temporary context, then hand the caller an
+     * owned copy sized exactly to the result so they can free() it. */
+    hifiasm_sketch_ctx_t ctx = {{0, 0, NULL}, {0, 0, NULL}, NULL, 0};
+    const hifiasm_minimizer_t *mz = NULL;
+    int n = 0;
+    int rc = sketch_into_ctx(&ctx, seq, len, w, k, is_hpc, &mz, &n);
+    if (rc != 0 || n == 0) {
+        free(ctx.mz.a); free(ctx.mt.a); free(ctx.out);
+        return rc;
+    }
+
+    hifiasm_minimizer_t *result =
+        (hifiasm_minimizer_t*)malloc((size_t)n * sizeof(hifiasm_minimizer_t));
+    if (result == NULL) {
+        free(ctx.mz.a); free(ctx.mt.a); free(ctx.out);
+        fprintf(stderr, "[hifiasm_sketch_minimizers] out of memory\n");
+        return 1;
+    }
+    memcpy(result, mz, (size_t)n * sizeof(hifiasm_minimizer_t));
+    free(ctx.mz.a); free(ctx.mt.a); free(ctx.out);
 
     *out_mz = result;
-    *out_n  = (int)n;
+    *out_n  = n;
     return 0;
 }

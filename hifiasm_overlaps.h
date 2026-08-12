@@ -115,6 +115,49 @@ int hifiasm_sketch_minimizers(const char *seq,
                               hifiasm_minimizer_t **out_mz,
                               int *out_n);
 
+/*
+ * Reusable sketch context.
+ *
+ * hifiasm_sketch_minimizers() allocates and frees its work buffers on every
+ * call, which is fine for one-shot use but wasteful when sketching many reads
+ * (e.g. as an assembler's marker source). The context variant keeps the sketch
+ * scratch buffers alive across calls, so steady-state sketching performs no
+ * per-read heap allocation once the buffers have grown to fit.
+ *
+ * A context is NOT thread-safe: give each worker thread its own context. It
+ * carries no read/option global state, so distinct contexts can be used
+ * concurrently.
+ */
+typedef struct hifiasm_sketch_ctx_s hifiasm_sketch_ctx_t;
+
+/* Create a context. Returns NULL on allocation failure. */
+hifiasm_sketch_ctx_t *hifiasm_sketch_ctx_init(void);
+
+/* Destroy a context and free its buffers. NULL is accepted (no-op). */
+void hifiasm_sketch_ctx_destroy(hifiasm_sketch_ctx_t *ctx);
+
+/*
+ * Sketch a single sequence using context-owned storage. Semantics of seq/len/
+ * w/k/is_hpc match hifiasm_sketch_minimizers().
+ *
+ * On success, *out_mz points into the context's internal buffer and *out_n is
+ * the number of minimizers. The pointer is valid only until the next call on
+ * the same context (or hifiasm_sketch_ctx_destroy); the CALLER MUST NOT free
+ * it. On zero minimizers, *out_mz is NULL and *out_n is 0.
+ *
+ * The returned minimizers are sorted by ascending START position and
+ * deduplicated (each START position appears once). Returns 0 on success,
+ * non-zero on error (invalid arguments or allocation failure).
+ */
+int hifiasm_sketch_minimizers_ctx(hifiasm_sketch_ctx_t *ctx,
+                                  const char *seq,
+                                  int len,
+                                  int w,
+                                  int k,
+                                  int is_hpc,
+                                  const hifiasm_minimizer_t **out_mz,
+                                  int *out_n);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

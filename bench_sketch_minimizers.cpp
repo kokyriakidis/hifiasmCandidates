@@ -60,6 +60,7 @@ int main(int argc, char** argv)
     std::vector<uint32_t> gaps;
     gaps.reserve((size_t)num_reads * (2 * read_len / (w + 1) + 4));
 
+    /* --- One-shot path: allocates + frees per read. --- */
     const auto t0 = std::chrono::steady_clock::now();
     for (int i = 0; i < num_reads; ++i) {
         hifiasm_minimizer_t* mz = nullptr;
@@ -76,6 +77,23 @@ int main(int argc, char** argv)
     const double secs =
         std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
 
+    /* --- Context path: buffers reused, no per-read allocation at steady state. --- */
+    hifiasm_sketch_ctx_t* ctx = hifiasm_sketch_ctx_init();
+    uint64_t ctx_total_mz = 0;
+    const auto c0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < num_reads; ++i) {
+        const hifiasm_minimizer_t* mz = nullptr;
+        int n = 0;
+        int rc = hifiasm_sketch_minimizers_ctx(ctx, reads[i].c_str(),
+                                               (int)reads[i].size(), w, k, 0, &mz, &n);
+        if (rc != 0) { std::fprintf(stderr, "ctx sketch failed on read %d\n", i); return 1; }
+        ctx_total_mz += (uint64_t)n;
+    }
+    const auto c1 = std::chrono::steady_clock::now();
+    const double ctx_secs =
+        std::chrono::duration_cast<std::chrono::duration<double>>(c1 - c0).count();
+    hifiasm_sketch_ctx_destroy(ctx);
+
     std::sort(gaps.begin(), gaps.end());
     auto pct = [&](double p) -> uint32_t {
         if (gaps.empty()) return 0;
@@ -90,9 +108,12 @@ int main(int argc, char** argv)
     std::printf("reads            : %d x %zu bp  (%.1f Mbp total)\n",
                 num_reads, read_len, total_bases / 1e6);
     std::printf("k, w             : %d, %d\n", k, w);
-    std::printf("wall time        : %.3f s\n", secs);
-    std::printf("throughput       : %.1f Mbp/s, %.0f reads/s\n",
-                (total_bases / 1e6) / secs, num_reads / secs);
+    std::printf("one-shot time    : %.3f s  (%.1f Mbp/s, %.0f reads/s)\n",
+                secs, (total_bases / 1e6) / secs, num_reads / secs);
+    std::printf("ctx time         : %.3f s  (%.1f Mbp/s, %.0f reads/s)\n",
+                ctx_secs, (total_bases / 1e6) / ctx_secs, num_reads / ctx_secs);
+    std::printf("ctx speedup      : %.2fx  (same minimizers: %s)\n",
+                secs / ctx_secs, ctx_total_mz == total_mz ? "yes" : "NO");
     std::printf("minimizers       : %llu total\n",
                 (unsigned long long)total_mz);
     std::printf("density (mz/base): %.4f  (ideal 2/(w+1) = %.4f)\n",

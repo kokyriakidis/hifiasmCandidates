@@ -212,12 +212,69 @@ static void test_edge_cases()
     free(mz);
 }
 
+/* The context path must produce exactly the same output as the one-shot path,
+ * be reusable across many reads, and deduplicate by START position. */
+static void test_ctx_equivalence()
+{
+    const int k = 50, w = 50;
+    hifiasm_sketch_ctx_t* ctx = hifiasm_sketch_ctx_init();
+    CHECK(ctx != nullptr, "ctx init succeeds");
+    if (!ctx) return;
+
+    for (uint32_t seed = 1; seed <= 20; ++seed) {
+        std::string s = random_seq(3000 + seed * 100, seed * 7919u + 1);
+
+        hifiasm_minimizer_t* one = nullptr; int n1 = 0;
+        hifiasm_sketch_minimizers(s.c_str(), (int)s.size(), w, k, 0, &one, &n1);
+
+        const hifiasm_minimizer_t* cm = nullptr; int n2 = 0;
+        int rc = hifiasm_sketch_minimizers_ctx(ctx, s.c_str(), (int)s.size(),
+                                               w, k, 0, &cm, &n2);
+        CHECK(rc == 0, "ctx sketch returns 0");
+        CHECK(n1 == n2, "ctx and one-shot produce same count");
+        if (n1 == n2) {
+            bool same = true;
+            for (int i = 0; i < n1; ++i) {
+                if (one[i].pos != cm[i].pos || one[i].hash != cm[i].hash ||
+                    one[i].rev != cm[i].rev || one[i].span != cm[i].span) {
+                    same = false; break;
+                }
+            }
+            CHECK(same, "ctx and one-shot produce identical output");
+        }
+        /* Output must be strictly increasing in START position (sorted+deduped). */
+        for (int i = 1; i < n2; ++i)
+            CHECK(cm[i].pos > cm[i - 1].pos, "ctx output strictly increasing (deduped)");
+
+        free(one);
+    }
+    hifiasm_sketch_ctx_destroy(ctx);
+    hifiasm_sketch_ctx_destroy(nullptr); /* NULL is a no-op */
+}
+
+/* A homopolymer-heavy sequence in no-HPC mode can produce several k-mers that
+ * are identical in hash but the minimizer scheme selects distinct START
+ * positions; ensure the deduped output never contains a repeated START. */
+static void test_dedup_positions()
+{
+    std::string s;
+    for (int i = 0; i < 40; ++i) s += "ACACACACGTGTGTGTAACCGGTT";
+    const int k = 21, w = 21;
+    hifiasm_minimizer_t* mz = nullptr; int n = 0;
+    hifiasm_sketch_minimizers(s.c_str(), (int)s.size(), w, k, 0, &mz, &n);
+    for (int i = 1; i < n; ++i)
+        CHECK(mz[i].pos > mz[i - 1].pos, "one-shot output has no duplicate START");
+    free(mz);
+}
+
 int main()
 {
     test_basic_invariants();
     test_determinism();
     test_hpc_span();
     test_edge_cases();
+    test_ctx_equivalence();
+    test_dedup_positions();
 
     if (g_failures == 0) {
         std::printf("ALL TESTS PASSED\n");
