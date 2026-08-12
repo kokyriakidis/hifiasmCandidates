@@ -23,6 +23,11 @@
  * step. Writes the PAF using asm_opt.output_file_name as the prefix. */
 int ha_detect_candidates(void);
 
+/* Store-fed variant (candidates.cpp): same pipeline as ha_detect_candidates()
+ * but reads sequences back from an ALREADY-LOADED R_INF (read_from_store=1) and
+ * leaves R_INF intact for the caller to release. */
+int ha_detect_candidates_from_store(void);
+
 /* ---------------------------------------------------------------------------
  * In-memory overlap sink.
  * ---------------------------------------------------------------------------
@@ -338,6 +343,213 @@ void hifiasm_overlaps_mem_free(hifiasm_overlap_t *ov,
     free(name_off);
 }
 
+/* ---------------------------------------------------------------------------
+ * Shared-read-store path: load reads once, run filter build + overlap
+ * detection against the in-memory store with no file I/O.
+ * ---------------------------------------------------------------------------
+ *
+ * hifiasm's own loaders populate R_INF in two passes while streaming the read
+ * files (see the HAF_RS_WRITE_LEN / HAF_RS_WRITE_SEQ arms of mz1_worker_count
+ * in htab.cpp and ha_count()):
+ *
+ *   pass 1 (lengths): init_All_reads(); ha_insert_read_len() per read to
+ *                     accumulate read_length[], name_index[], total_reads,
+ *                     total_reads_bases, total_name_length.
+ *   pass 2 (bases)  : malloc_All_reads() to allocate the per-read arrays sized
+ *                     from pass 1; then per read ha_compress_base() (2-bit pack
+ *                     into read_sperate[i], recording ambiguous-base positions
+ *                     in N_site[i]) and memcpy the name into name[].
+ *
+ * We reproduce exactly that sequence from the caller's in-memory reads so the
+ * resulting store is bit-identical to what the file path would have built, and
+ * both ha_ft_gen(read_from_store=1) and ha_pt_gen(read_from_store=1) can then
+ * read the sequences straight back from it via recover_UC_Read().
+ *
+ * seq_nt4_table (htab.cpp) is the same table hifiasm's file path uses to count
+ * ambiguous bases (value >= 4) before ha_compress_base; using it here keeps the
+ * N_site occupancy identical. init_aux_table() primes bit_t_seq_table so any
+ * later recover_UC_Read() decodes correctly (the file path primes it lazily via
+ * init_UC_Read()). */
+
+/* Tracks whether hifiasm_reads_store_load() currently owns R_INF, so
+ * release() is a safe no-op when nothing is loaded and load() refuses to
+ * clobber an already-loaded store. */
+static int g_store_loaded = 0;
+
+int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads)
+{
+    if (reads == NULL || n_reads == 0) {
+        fprintf(stderr, "[hifiasm_reads_store_load] invalid arguments\n");
+        return 1;
+    }
+    if (n_reads > (uint64_t)(1 << 28)) {
+        fprintf(stderr, "[hifiasm_reads_store_load] too many reads (%llu > %d)\n",
+                (unsigned long long)n_reads, 1 << 28);
+        return 1;
+    }
+    if (g_store_loaded) {
+        fprintf(stderr, "[hifiasm_reads_store_load] a store is already loaded; "
+                        "call hifiasm_reads_store_release() first\n");
+        return 1;
+    }
+
+    /* Prime the 2-bit decode table used by recover_UC_Read(). */
+    init_aux_table();
+
+    /* pass 1: read/name lengths. init_All_reads() zeroes R_INF and allocates
+     * the growable read_length[]/name_index[] arrays; ha_insert_read_len()
+     * mirrors the file path's per-read bookkeeping exactly. */
+    init_All_reads(&R_INF);
+    for (uint64_t i = 0; i < n_reads; ++i) {
+        uint64_t sl = reads[i].seq_len;
+        uint32_t nl = reads[i].name_len;
+        if (reads[i].seq == NULL || sl == 0) {
+            fprintf(stderr,
+                    "[hifiasm_reads_store_load] read %llu has empty sequence\n",
+                    (unsigned long long)i);
+            destory_All_reads(&R_INF);
+            reset_read_store();
+            return 1;
+        }
+        /* read_len/name_len are ints in the hifiasm ABI; guard the narrowing. */
+        if (sl > (uint64_t)INT32_MAX || nl > (uint32_t)INT32_MAX) {
+            fprintf(stderr,
+                    "[hifiasm_reads_store_load] read %llu too long\n",
+                    (unsigned long long)i);
+            destory_All_reads(&R_INF);
+            reset_read_store();
+            return 1;
+        }
+        ha_insert_read_len(&R_INF, (int)sl, (int)nl);
+    }
+
+    /* pass 2: allocate per-read arrays sized from pass 1, then fill bases and
+     * names. malloc_All_reads() consults asm_opt.is_sc for the optional quality
+     * store; the bridge never sets it, so no rsc is allocated. */
+    malloc_All_reads(&R_INF);
+    for (uint64_t i = 0; i < n_reads; ++i) {
+        const char *seq = reads[i].seq;
+        uint64_t    sl  = reads[i].seq_len;
+
+        /* Count ambiguous (non-ACGT) bases exactly as the file path does, so
+         * ha_compress_base allocates N_site[i] to the right size. */
+        uint64_t n_N = 0;
+        for (uint64_t j = 0; j < sl; ++j)
+            if (seq_nt4_table[(uint8_t)seq[j]] >= 4) ++n_N;
+
+        /* ha_compress_base takes a non-const char*; it only reads src. */
+        ha_compress_base(Get_READ(R_INF, i), (char*)seq, sl,
+                         &R_INF.N_site[i], n_N);
+
+        if (reads[i].name_len)
+            memcpy(&R_INF.name[R_INF.name_index[i]],
+                   reads[i].name, reads[i].name_len);
+    }
+
+    g_store_loaded = 1;
+    return 0;
+}
+
+void hifiasm_reads_store_release(void)
+{
+    if (!g_store_loaded) return;
+    destory_All_reads(&R_INF);
+    reset_read_store();
+    g_store_loaded = 0;
+}
+
+/* Build an argv/asm_opt equivalent to a CLI invocation but WITHOUT any input
+ * files: the reads already live in R_INF, so CommandLine_process() would reject
+ * an empty file list. We therefore initialise options directly (init_opt +
+ * targeted overrides) instead of going through CommandLine_process(). This
+ * mirrors the subset of option state the file path ends up in for the overlap
+ * pipeline. Returns 0 on success. */
+/* ha_count() loops `for (i = 0; i < asm_opt.num_reads; ++i)` and calls
+ * yak_count(asm_opt.read_file_names[i], ...). On the store path the reads come
+ * from R_INF (HAF_RS_READ) and the filename is never opened, but the loop must
+ * still execute at least once (otherwise the count table `h` is never created)
+ * and read_file_names[0] is dereferenced as an argument. So we install a
+ * 1-element dummy file list. destory_opt() frees the array itself (not the
+ * element, which points to a string literal). */
+static void store_install_dummy_file_list(void)
+{
+    asm_opt.num_reads = 1;
+    asm_opt.read_file_names = (char**)malloc(sizeof(char*));
+    asm_opt.read_file_names[0] = (char*)"<in-memory-store>"; /* never opened */
+}
+
+static int store_opt_from_ovlp(const hifiasm_ovlp_opt_t *opt)
+{
+    init_opt(&asm_opt);
+    store_install_dummy_file_list();
+
+    asm_opt.thread_num = (opt && opt->threads > 0) ? opt->threads : 1;
+    /* Placeholder prefix; the sink is active for the store path so no file is
+     * written, but coverage/option logic may still read the name. */
+    asm_opt.output_file_name = (char*)"hifiasm.store";
+
+    if (opt && opt->is_ont) {
+        asm_opt.is_ont = 1;
+        asm_opt.max_ov_diff_ec = 0.07;
+        /* Do NOT set is_sc: the store carries no base-quality track, and the
+         * quality store (rsc) was not allocated by the loader. */
+    }
+    if (opt && opt->k_mer_length > 0) asm_opt.k_mer_length = opt->k_mer_length;
+    if (opt && opt->mz_win > 0)       asm_opt.mz_win       = opt->mz_win;
+    if (opt && opt->max_ov_diff > 0.0) asm_opt.max_ov_diff_ec = opt->max_ov_diff;
+    if (opt && opt->raw_candidates)   asm_opt.dbg_ovec_cal = 1;
+
+    /* HiFi keeps every read (the file path sets rl_cut = -1 when !is_ont).
+     * Leaving is_ont's rl_cut/sc_cut defaults for ONT matches the CLI. */
+    if (!asm_opt.is_ont) { asm_opt.rl_cut = -1; asm_opt.sc_cut = 1; }
+
+    return 0;
+}
+
+int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
+                                       hifiasm_overlap_t **out_ov,
+                                       uint64_t *out_n_ov,
+                                       char **out_names,
+                                       uint64_t **out_name_off,
+                                       uint64_t *out_n_reads)
+{
+    if (out_ov)       *out_ov = NULL;
+    if (out_n_ov)     *out_n_ov = 0;
+    if (out_names)    *out_names = NULL;
+    if (out_name_off) *out_name_off = NULL;
+    if (out_n_reads)  *out_n_reads = 0;
+
+    if (out_ov == NULL || out_n_ov == NULL || out_names == NULL ||
+        out_name_off == NULL || out_n_reads == NULL) {
+        fprintf(stderr, "[hifiasm_detect_overlaps_from_store] invalid arguments\n");
+        return 1;
+    }
+    if (!g_store_loaded) {
+        fprintf(stderr, "[hifiasm_detect_overlaps_from_store] no reads loaded; "
+                        "call hifiasm_reads_store_load() first\n");
+        return 1;
+    }
+
+    yak_reset_realtime();
+    store_opt_from_ovlp(opt);
+
+    hifiasm_ovlp_sink_begin();
+    int ret = ha_detect_candidates_from_store();  /* leaves R_INF intact */
+    hifiasm_ovlp_sink_end(out_ov, out_n_ov, out_names, out_name_off, out_n_reads);
+
+    destory_opt(&asm_opt);
+
+    if (ret != 0) {
+        hifiasm_overlaps_mem_free(*out_ov, *out_names, *out_name_off);
+        *out_ov = NULL; *out_n_ov = 0;
+        *out_names = NULL; *out_name_off = NULL; *out_n_reads = 0;
+        fprintf(stderr,
+                "[hifiasm_detect_overlaps_from_store] pipeline failed (%d)\n", ret);
+        return ret;
+    }
+    return 0;
+}
+
 /*
  * Build a high-occurrence k-mer filter table over the given read files.
  *
@@ -440,6 +652,66 @@ hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
     if (hf == NULL) {
         ha_ft_destroy(raw);
         fprintf(stderr, "[hifiasm_build_filter] out of memory\n");
+        return NULL;
+    }
+    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc;
+    return hf;
+}
+
+/*
+ * Build the filter over the ALREADY-LOADED store (hifiasm_reads_store_load)
+ * instead of reading files. Same options, return value and ownership as
+ * hifiasm_build_filter().
+ *
+ * Because the reads already live in R_INF, we do NOT go through
+ * CommandLine_process()/argv (which requires a non-empty file list): options
+ * are set directly (init_opt + the exact k/w/HPC/rl_cut the caller asked for),
+ * then ha_ft_gen(read_from_store=1) reads the sequences back from the store and
+ * builds the table. R_INF is left intact for the caller to release.
+ */
+hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *opt)
+{
+    if (!g_store_loaded) {
+        fprintf(stderr, "[hifiasm_build_filter_from_store] no reads loaded; "
+                        "call hifiasm_reads_store_load() first\n");
+        return NULL;
+    }
+
+    int k       = (opt && opt->k_mer_length > 0) ? opt->k_mer_length : 50;
+    int w       = (opt && opt->mz_win       > 0) ? opt->mz_win       : 50;
+    int is_hpc  = (opt && opt->is_hpc) ? 1 : 0;
+    int threads = (opt && opt->threads > 0) ? opt->threads : 1;
+    int64_t rl_cut = (opt && opt->min_read_len >= 0) ? opt->min_read_len : -1;
+
+    yak_reset_realtime();
+    init_opt(&asm_opt);
+    store_install_dummy_file_list();
+    asm_opt.thread_num       = threads;
+    asm_opt.output_file_name = (char*)"hifiasm_filter.store";
+    asm_opt.k_mer_length     = k;
+    asm_opt.mz_win           = w;
+    if (is_hpc) asm_opt.flag &= ~HA_F_NO_HPC;
+    else        asm_opt.flag |=  HA_F_NO_HPC;
+    asm_opt.rl_cut = rl_cut;
+
+    int hom_cov = -1;
+    /* read_from_store=1: read sequences back from the pre-loaded R_INF and
+     * build the high-occurrence table. R_INF is NOT modified or freed here. */
+    void *raw = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, /*is_hp_mode*/ 0,
+                          /*read_from_store*/ 1);
+
+    destory_opt(&asm_opt);
+
+    if (raw == NULL) {
+        fprintf(stderr,
+                "[hifiasm_build_filter_from_store] filter table build failed\n");
+        return NULL;
+    }
+
+    hifiasm_filter_t *hf = (hifiasm_filter_t*)calloc(1, sizeof(*hf));
+    if (hf == NULL) {
+        ha_ft_destroy(raw);
+        fprintf(stderr, "[hifiasm_build_filter_from_store] out of memory\n");
         return NULL;
     }
     hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc;

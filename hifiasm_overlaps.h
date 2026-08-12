@@ -139,6 +139,62 @@ void hifiasm_overlaps_mem_free(hifiasm_overlap_t *ov,
                                char *names,
                                uint64_t *name_off);
 
+
+/* ---------------------------------------------------------------------------
+ * Shared-read-store path (deepest integration): feed reads from memory.
+ * ---------------------------------------------------------------------------
+ * The functions above each read the input FASTA/FASTQ files themselves. When a
+ * caller (dinara) has ALREADY loaded the reads, that re-reads the same bytes
+ * from disk. The functions below instead take the reads in memory and load them
+ * once into hifiasm's read store, so BOTH the marker filter build and overlap
+ * detection can run without touching the input files again.
+ *
+ * The raw read bases are independent of k and homopolymer-compression, so the
+ * SAME loaded store serves the no-HPC k=50 filter/sketch AND the HPC k=51
+ * overlap detection; only the per-call k/w/HPC options differ.
+ */
+
+/* One read handed to the shared-store loader. seq must be raw ASCII bases
+ * (A/C/G/T/N/...); non-ACGT bases are recorded as ambiguous, matching hifiasm's
+ * file loader. name need not be NUL-terminated (name_len gives its length). */
+typedef struct {
+    const char *seq;
+    uint64_t    seq_len;
+    const char *name;
+    uint32_t    name_len;
+} hifiasm_read_t;
+
+/*
+ * Load `reads` into hifiasm's process-global read store (R_INF). Must be called
+ * before hifiasm_build_filter_from_store() / hifiasm_detect_overlaps_from_store()
+ * and released afterwards with hifiasm_reads_store_release(). Reads keep the
+ * given order, so read index i corresponds to reads[i]. Returns 0 on success.
+ *
+ * NOTE: process-global and NOT thread-safe; one loaded store at a time.
+ */
+int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads);
+
+/* Free the read store loaded by hifiasm_reads_store_load(). No-op if nothing is
+ * loaded. */
+void hifiasm_reads_store_release(void);
+
+/*
+ * Run overlap detection over the ALREADY-LOADED store, returning overlaps in
+ * memory. Same outputs/ownership as hifiasm_detect_overlaps_mem(), but reads
+ * nothing from disk. The name table is taken from the loaded store.
+ */
+int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
+                                       hifiasm_overlap_t **out_ov,
+                                       uint64_t *out_n_ov,
+                                       char **out_names,
+                                       uint64_t **out_name_off,
+                                       uint64_t *out_n_reads);
+
+/* The store-fed filter builder (hifiasm_build_filter_from_store) is declared
+ * further down, next to hifiasm_build_filter(), because it shares that
+ * function's option and result types (hifiasm_filter_opt_t / hifiasm_filter_t).
+ */
+
 /*
  * One minimizer produced by hifiasm_sketch_minimizers().
  *
@@ -254,6 +310,14 @@ hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
 
 /* Destroy a filter handle. NULL is accepted (no-op). */
 void hifiasm_filter_destroy(hifiasm_filter_t *hf);
+
+/*
+ * Build the filter over the ALREADY-LOADED store (see hifiasm_reads_store_load)
+ * instead of reading files. Same options, return value and ownership as
+ * hifiasm_build_filter(); reads nothing from disk. Free with
+ * hifiasm_filter_destroy().
+ */
+hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *opt);
 
 /*
  * A k-mer whose occurrence count is >= HIFIASM_FILTER_HIGH_OCC is considered

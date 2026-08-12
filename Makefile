@@ -60,14 +60,20 @@ test_sketch_filter:test_sketch_filter.cpp $(LIB)
 bench_sketch_filter:bench_sketch_filter.cpp $(LIB)
 		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
 
+# test_store_overlaps     : shared-read-store path parity vs the file-based path
+test_store_overlaps:test_store_overlaps.cpp $(LIB)
+		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
+
 # Build and run the correctness tests.
-test:test_sketch_minimizers test_sketch_filter
+test:test_sketch_minimizers test_sketch_filter test_store_overlaps
 		./test_sketch_minimizers
 		./test_sketch_filter
+		./test_store_overlaps
 
 clean:
 		rm -fr gmon.out *.o a.out $(EXE) *~ *.a *.dSYM \
-			test_sketch_minimizers test_sketch_filter bench_sketch_filter
+			test_sketch_minimizers test_sketch_filter bench_sketch_filter \
+			test_store_overlaps
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CPPFLAGS) $(DFLAGS) -- *.cpp)

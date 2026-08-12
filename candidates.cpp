@@ -257,7 +257,18 @@ static int detect_candidates_raw(void)
     return 0;
 }
 
-int ha_detect_candidates(void)
+// Shared body of the candidate pipeline. `from_store` selects how R_INF is
+// populated:
+//   from_store == 0 : the read files are streamed (ha_ft_gen writes read
+//                     *lengths* into R_INF, then ha_pt_gen reads the sequences);
+//                     R_INF is torn down at the end. This is the original CLI /
+//                     file-based path.
+//   from_store != 0 : R_INF was ALREADY loaded from memory by the bridge
+//                     (hifiasm_reads_store_load), so ha_ft_gen/ha_pt_gen must
+//                     read sequences from the store (read_from_store=1) rather
+//                     than from files, and R_INF is left intact for the caller
+//                     to release with hifiasm_reads_store_release().
+static int ha_detect_candidates_impl(int from_store)
 {
     int hom_cov = -1, het_cov = -1;
     int ret = 0;
@@ -265,16 +276,25 @@ int ha_detect_candidates(void)
     ha_flt_tab = NULL;
     ha_idx = NULL;
 
-    // 1) high-occurrence k-mer filter table (also scans reads / lengths)
+    // 1) high-occurrence k-mer filter table.
+    //   file path   : ha_ft_gen(read_from_store=0) scans the files and records
+    //                 read lengths into R_INF (HAF_RS_WRITE_LEN).
+    //   store path  : ha_ft_gen(read_from_store=1) reads sequences back from the
+    //                 pre-loaded R_INF (HAF_RS_READ); it writes nothing into it.
     if (!(asm_opt.flag & HA_F_NO_KMER_FLT)) {
-        ha_flt_tab = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, 0, 0);
+        ha_flt_tab = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, 0, from_store);
         ha_opt_update_cov(&asm_opt, hom_cov);
     }
 
-    // 2) position index over the raw reads (loads read sequences into R_INF).
-    // read_from_store must be 0 here: ha_ft_gen only wrote read *lengths*
-    // (HAF_RS_WRITE_LEN), so pt_gen still needs to read the sequences.
-    ha_idx = ha_pt_gen(&asm_opt, ha_flt_tab, 0, 0, &R_INF, &hom_cov, &het_cov);
+    // 2) position index over the raw reads.
+    //   file path   : read_from_store=0. When the filter step ran it wrote only
+    //                 read *lengths*, so ha_pt_gen loads the sequences; when the
+    //                 filter was skipped R_INF.total_reads==0 and ha_pt_gen does
+    //                 the length+sequence load itself.
+    //   store path  : read_from_store=1. Sequences are already in R_INF, so
+    //                 ha_pt_gen reads them from the store in both of its passes.
+    ha_idx = ha_pt_gen(&asm_opt, ha_flt_tab, from_store, 0, &R_INF,
+                       &hom_cov, &het_cov);
     asm_opt.hom_cov = hom_cov;
     asm_opt.het_cov = het_cov;
     if (ha_flt_tab == NULL) ha_opt_update_cov(&asm_opt, hom_cov);
@@ -302,10 +322,25 @@ int ha_detect_candidates(void)
     hifiasm_ovlp_sink_capture_names(R_INF.name, R_INF.name_index,
                                     R_INF.total_reads, R_INF.total_name_length);
 
-    // 4) cleanup
+    // 4) cleanup. Always drop the indices/filter. R_INF is torn down only on
+    // the file path; on the store path the caller owns R_INF and releases it
+    // with hifiasm_reads_store_release() so it can be reused across calls (the
+    // same loaded store serves both the filter build and overlap detection).
     ha_pt_destroy(ha_idx); ha_idx = NULL;
     ha_ft_destroy(ha_flt_tab); ha_flt_tab = NULL;
-    destory_All_reads(&R_INF);
+    if (!from_store) destory_All_reads(&R_INF);
 
     return ret;
+}
+
+int ha_detect_candidates(void)
+{
+    return ha_detect_candidates_impl(/*from_store*/ 0);
+}
+
+// Store-fed variant: R_INF must already be loaded (hifiasm_reads_store_load).
+// Reads nothing from disk and leaves R_INF intact for the caller to release.
+int ha_detect_candidates_from_store(void)
+{
+    return ha_detect_candidates_impl(/*from_store*/ 1);
 }
