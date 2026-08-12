@@ -4,6 +4,9 @@
 *.json
 hifiasm
 build/
+# Compiled test/bench harnesses (source .cpp is tracked, binaries are not).
+test_sketch_minimizers
+bench_sketch_minimizers
 *.fastq
 *.fastq.gz
 *.fq

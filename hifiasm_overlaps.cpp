@@ -110,3 +110,95 @@ int hifiasm_detect_overlaps(const char *const *read_files,
     }
     return 0;
 }
+
+/* Order minimizers by ascending START position, breaking ties by hash so the
+ * output is deterministic regardless of the sketcher's emission order. */
+static int cmp_minimizer_by_pos(const void *pa, const void *pb)
+{
+    const hifiasm_minimizer_t *a = (const hifiasm_minimizer_t*)pa;
+    const hifiasm_minimizer_t *b = (const hifiasm_minimizer_t*)pb;
+    if (a->pos != b->pos) return a->pos < b->pos ? -1 : 1;
+    if (a->hash != b->hash) return a->hash < b->hash ? -1 : 1;
+    return 0;
+}
+
+int hifiasm_sketch_minimizers(const char *seq,
+                              int len,
+                              int w,
+                              int k,
+                              int is_hpc,
+                              hifiasm_minimizer_t **out_mz,
+                              int *out_n)
+{
+    if (out_mz) *out_mz = NULL;
+    if (out_n)  *out_n  = 0;
+    if (seq == NULL || out_mz == NULL || out_n == NULL) {
+        fprintf(stderr, "[hifiasm_sketch_minimizers] invalid arguments\n");
+        return 1;
+    }
+    /* Mirror mz1_ha_sketch's own asserts as graceful errors so callers get a
+     * return code instead of an abort on out-of-range parameters. */
+    if (len <= 0 || w <= 0 || w >= 256 || k <= 0 || k > 63) {
+        fprintf(stderr, "[hifiasm_sketch_minimizers] parameter out of range "
+                        "(len=%d, w=%d, k=%d)\n", len, w, k);
+        return 1;
+    }
+
+    /* Local sketch buffers. mz1_ha_sketch dereferences `mt` unconditionally,
+     * so it must be a valid (zeroed) st_mt_t; passing km=NULL routes all
+     * kvec allocations through the stdlib allocator, so ->a can be free()d. */
+    ha_mz1_v mz = {0, 0, NULL};
+    st_mt_t  mt = {0, 0, NULL};
+
+    /* hf=NULL           -> no frequency filter (cnt always 0, nothing dropped)
+     * sample_dist=0     -> skips select_mz_h subsampling (needs sample_dist>w)
+     * pt=NULL, dp_min_len=-1 -> skips refine_sketch
+     * is_unique=0, dp_e=-1, ws ignored without subsampling.
+     * So the result depends only on (seq, len, w, k, is_hpc). */
+    mz1_ha_sketch(seq, len, w, k, /*rid*/ 0, is_hpc ? 1 : 0, &mz,
+                  /*hf*/ NULL, /*sample_dist*/ 0, /*k_flag*/ NULL,
+                  /*dbg_ct*/ NULL, /*pt*/ NULL, /*min_freq*/ -1,
+                  /*dp_min_len*/ -1, /*dp_e*/ -1.0f, &mt, /*ws*/ w,
+                  /*is_unique*/ 0, /*km*/ NULL);
+
+    free(mt.a);
+
+    const uint32_t n = mz.n;
+    if (n == 0) {
+        free(mz.a);
+        return 0;
+    }
+
+    hifiasm_minimizer_t *result =
+        (hifiasm_minimizer_t*)malloc((size_t)n * sizeof(hifiasm_minimizer_t));
+    if (result == NULL) {
+        free(mz.a);
+        fprintf(stderr, "[hifiasm_sketch_minimizers] out of memory\n");
+        return 1;
+    }
+
+    /* ha_mz1_t stores the END position; convert to START = end + 1 - span.
+     * With is_hpc=0, span == k. mz1_ha_sketch never emits a k-mer whose span
+     * runs past the sequence, so start >= 0 and start + span <= len hold. */
+    for (uint32_t i = 0; i < n; ++i) {
+        const ha_mz1_t *m = &mz.a[i];
+        const uint32_t span = (uint32_t)m->span;
+        const uint32_t end  = (uint32_t)m->pos;
+        result[i].pos  = end + 1u - span;
+        result[i].span = span;
+        result[i].rev  = (uint32_t)m->rev;
+        result[i].hash = m->x;
+    }
+
+    free(mz.a);
+
+    /* Emitted order follows window scans and is largely position-ordered but
+     * not strictly (identical-minimizer flushes and end handling can inter
+     * leave it slightly out of order). Sort by START so callers get a clean
+     * monotonic list. */
+    qsort(result, n, sizeof(hifiasm_minimizer_t), cmp_minimizer_by_pos);
+
+    *out_mz = result;
+    *out_n  = (int)n;
+    return 0;
+}

@@ -18,6 +18,8 @@
 #ifndef HIFIASM_OVERLAPS_H
 #define HIFIASM_OVERLAPS_H
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -57,6 +59,61 @@ int hifiasm_detect_overlaps(const char *const *read_files,
                             const char *output_prefix,
                             const hifiasm_ovlp_opt_t *opt,
                             char **out_paf_path);
+
+/*
+ * One minimizer produced by hifiasm_sketch_minimizers().
+ *
+ *   pos : START position of the k-mer on the forward strand of the input
+ *         sequence (0-based). hifiasm's internal sketch stores the END
+ *         position; this bridge converts to START (end + 1 - span) so callers
+ *         that key markers on the k-mer start (e.g. dinara) can use it
+ *         directly. Guaranteed 0 <= pos and pos + span <= len.
+ *   span: length of the k-mer in bases. With HPC disabled this always equals
+ *         k; it is still returned so HPC-mode callers (span may exceed k) work.
+ *   rev : 0 if the forward k-mer is canonical, 1 if the reverse complement is.
+ *   hash: hifiasm's canonical yak hash of the k-mer (order-independent seed
+ *         identity). Provided for callers that want hifiasm's identity; callers
+ *         that need the actual k-mer bases should re-extract them from the
+ *         sequence at [pos, pos+span) since the hash is not invertible.
+ */
+typedef struct {
+    uint32_t pos;
+    uint32_t span;
+    uint32_t rev;
+    uint64_t hash;
+} hifiasm_minimizer_t;
+
+/*
+ * Sketch a single sequence into its minimizers using hifiasm's sketcher,
+ * WITHOUT frequency filtering, position-table refinement, or subsampling
+ * (hf/pt/sample_dist are all disabled), so the output depends only on
+ * (seq, len, w, k, is_hpc).
+ *
+ *   seq     : sequence bases (ACGT/acgt; other chars are treated as ambiguous
+ *             and break k-mers, matching hifiasm). Not required to be
+ *             NUL-terminated; only the first `len` bytes are read.
+ *   len     : number of bases in `seq` (> 0).
+ *   w       : minimizer window (e.g. 50). Must satisfy 0 < w < 256.
+ *   k       : k-mer length (e.g. 50). Must satisfy 0 < k <= 63.
+ *   is_hpc  : 0 = no homopolymer compression (raw bases, span == k);
+ *             1 = HPC (span may exceed k).
+ *   out_mz  : receives a malloc()'d array of hifiasm_minimizer_t sorted by
+ *             ascending START position. Caller must free() it. On zero
+ *             minimizers, *out_mz is set to NULL.
+ *   out_n   : receives the number of minimizers written to *out_mz.
+ *
+ * Returns 0 on success, non-zero on error (invalid arguments or allocation
+ * failure). This function uses only local/heap state and does not touch the
+ * process-global option or read stores, so unlike hifiasm_detect_overlaps it
+ * is safe to call concurrently from multiple threads with distinct arguments.
+ */
+int hifiasm_sketch_minimizers(const char *seq,
+                              int len,
+                              int w,
+                              int k,
+                              int is_hpc,
+                              hifiasm_minimizer_t **out_mz,
+                              int *out_n);
 
 #ifdef __cplusplus
 } /* extern "C" */
