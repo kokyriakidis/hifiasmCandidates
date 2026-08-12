@@ -1,0 +1,55 @@
+/*
+ * hifiasm_overlaps_internal.h
+ *
+ * Internal (NOT part of the public bridge API) declarations shared between the
+ * bridge implementation (hifiasm_overlaps.cpp) and the two overlap emitters
+ * (candidates.cpp for the raw pre-alignment set, ecovlp.cpp for the aligned
+ * set). It exposes an in-memory "overlap sink": while active, the emitters push
+ * overlaps into a process-global buffer instead of writing a PAF file, so
+ * hifiasm_detect_overlaps_mem() can return them without the text round-trip.
+ *
+ * The sink and all its functions use hifiasm's process-global read/option
+ * stores and are NOT thread-safe with respect to begin/end/capture; push() is
+ * internally serialized so the per-read worker threads may call it
+ * concurrently. This matches the existing single-call-at-a-time contract of the
+ * bridge entry points.
+ */
+
+#ifndef HIFIASM_OVERLAPS_INTERNAL_H
+#define HIFIASM_OVERLAPS_INTERNAL_H
+
+#include <stdint.h>
+#include "hifiasm_overlaps.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Returns non-zero while an in-memory collection is in progress (i.e. between
+ * hifiasm_ovlp_sink_begin() and hifiasm_ovlp_sink_end()). The emitters check
+ * this to decide between pushing into the sink and writing PAF text. */
+int hifiasm_ovlp_sink_active(void);
+
+/* Append one overlap to the sink. Serialized internally; safe to call from the
+ * kt_for/kt_pipeline worker threads. No-op if the sink is not active. Fields
+ * mirror hifiasm_overlap_t (see hifiasm_overlaps.h). */
+void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
+                            uint32_t q_start, uint32_t q_end,
+                            uint32_t t_start, uint32_t t_end,
+                            uint32_t n_match, uint32_t block_len,
+                            uint8_t is_same_strand);
+
+/* Snapshot the read-name table into the sink. Called once by
+ * ha_detect_candidates() just before it tears down R_INF, so the names outlive
+ * the read store. name/name_index/total_name_length/total_reads come straight
+ * from R_INF. No-op if the sink is not active. */
+void hifiasm_ovlp_sink_capture_names(const char *name,
+                                     const uint64_t *name_index,
+                                     uint64_t total_reads,
+                                     uint64_t total_name_length);
+
+#ifdef __cplusplus
+} /* extern "C" */
+#endif
+
+#endif /* HIFIASM_OVERLAPS_INTERNAL_H */

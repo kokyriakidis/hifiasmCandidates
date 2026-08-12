@@ -10,8 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #include "hifiasm_overlaps.h"
+#include "hifiasm_overlaps_internal.h"
 #include "CommandLines.h"
 #include "Process_Read.h"
 #include "htab.h"
@@ -20,6 +22,117 @@
  * detection and, unless asm_opt.dbg_ovec_cal is set, the alignment/filter
  * step. Writes the PAF using asm_opt.output_file_name as the prefix. */
 int ha_detect_candidates(void);
+
+/* ---------------------------------------------------------------------------
+ * In-memory overlap sink.
+ * ---------------------------------------------------------------------------
+ * While active, the overlap emitters (candidates.cpp / ecovlp.cpp) push into
+ * this process-global buffer instead of writing PAF text. Because there is only
+ * ever one collection in flight (the bridge is single-call-at-a-time), a single
+ * static instance guarded by a mutex is sufficient. push() may be called
+ * concurrently from worker threads; begin/end/capture run on the caller thread
+ * with no workers active. */
+typedef struct {
+    int                active;
+    hifiasm_overlap_t *ov;
+    uint64_t           n;
+    uint64_t           m;      /* capacity */
+    char              *names;
+    uint64_t          *name_off;
+    uint64_t           n_reads;
+    uint64_t           name_len;
+    pthread_mutex_t    mtx;
+} hifiasm_ovlp_sink_t;
+
+static hifiasm_ovlp_sink_t g_sink = {
+    0, NULL, 0, 0, NULL, NULL, 0, 0, PTHREAD_MUTEX_INITIALIZER
+};
+
+int hifiasm_ovlp_sink_active(void)
+{
+    return g_sink.active;
+}
+
+void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
+                            uint32_t q_start, uint32_t q_end,
+                            uint32_t t_start, uint32_t t_end,
+                            uint32_t n_match, uint32_t block_len,
+                            uint8_t is_same_strand)
+{
+    if (!g_sink.active) return;
+    pthread_mutex_lock(&g_sink.mtx);
+    if (g_sink.n == g_sink.m) {
+        uint64_t nm = g_sink.m ? (g_sink.m << 1) : 4096;
+        hifiasm_overlap_t *na =
+            (hifiasm_overlap_t*)realloc(g_sink.ov, nm * sizeof(hifiasm_overlap_t));
+        if (na == NULL) {
+            /* Out of memory: drop this overlap rather than crash. The caller
+             * validates counts, and a short overlap set is preferable to an
+             * abort deep inside a worker thread. */
+            pthread_mutex_unlock(&g_sink.mtx);
+            return;
+        }
+        g_sink.ov = na;
+        g_sink.m  = nm;
+    }
+    hifiasm_overlap_t *o = &g_sink.ov[g_sink.n++];
+    o->q_id = q_id;   o->t_id = t_id;
+    o->q_start = q_start; o->q_end = q_end;
+    o->t_start = t_start; o->t_end = t_end;
+    o->n_match = n_match; o->block_len = block_len;
+    o->is_same_strand = is_same_strand;
+    pthread_mutex_unlock(&g_sink.mtx);
+}
+
+void hifiasm_ovlp_sink_capture_names(const char *name,
+                                     const uint64_t *name_index,
+                                     uint64_t total_reads,
+                                     uint64_t total_name_length)
+{
+    if (!g_sink.active) return;
+    if (name == NULL || name_index == NULL || total_reads == 0) return;
+
+    g_sink.names = (char*)malloc(total_name_length ? total_name_length : 1);
+    g_sink.name_off = (uint64_t*)malloc((total_reads + 1) * sizeof(uint64_t));
+    if (g_sink.names == NULL || g_sink.name_off == NULL) {
+        free(g_sink.names);    g_sink.names = NULL;
+        free(g_sink.name_off); g_sink.name_off = NULL;
+        return;
+    }
+    if (total_name_length) memcpy(g_sink.names, name, total_name_length);
+    memcpy(g_sink.name_off, name_index, (total_reads + 1) * sizeof(uint64_t));
+    g_sink.n_reads  = total_reads;
+    g_sink.name_len = total_name_length;
+}
+
+/* Begin/end are file-local: only hifiasm_detect_overlaps_mem() drives them. */
+static void hifiasm_ovlp_sink_begin(void)
+{
+    pthread_mutex_lock(&g_sink.mtx);
+    g_sink.ov = NULL; g_sink.n = 0; g_sink.m = 0;
+    g_sink.names = NULL; g_sink.name_off = NULL;
+    g_sink.n_reads = 0; g_sink.name_len = 0;
+    g_sink.active = 1;
+    pthread_mutex_unlock(&g_sink.mtx);
+}
+
+/* Hand ownership of the collected buffers to the caller and deactivate. */
+static void hifiasm_ovlp_sink_end(hifiasm_overlap_t **out_ov, uint64_t *out_n,
+                                  char **out_names, uint64_t **out_name_off,
+                                  uint64_t *out_n_reads)
+{
+    pthread_mutex_lock(&g_sink.mtx);
+    *out_ov       = g_sink.ov;
+    *out_n        = g_sink.n;
+    *out_names    = g_sink.names;
+    *out_name_off = g_sink.name_off;
+    *out_n_reads  = g_sink.n_reads;
+    g_sink.ov = NULL; g_sink.n = 0; g_sink.m = 0;
+    g_sink.names = NULL; g_sink.name_off = NULL;
+    g_sink.n_reads = 0; g_sink.name_len = 0;
+    g_sink.active = 0;
+    pthread_mutex_unlock(&g_sink.mtx);
+}
 
 /* Reset the process-global read store between calls so the bridge can be
  * invoked more than once in a single process. init_opt() memsets asm_opt, so
@@ -129,6 +242,100 @@ int hifiasm_detect_overlaps(const char *const *read_files,
         *out_paf_path = p;
     }
     return 0;
+}
+
+int hifiasm_detect_overlaps_mem(const char *const *read_files,
+                                int n_read_files,
+                                const hifiasm_ovlp_opt_t *opt,
+                                hifiasm_overlap_t **out_ov,
+                                uint64_t *out_n_ov,
+                                char **out_names,
+                                uint64_t **out_name_off,
+                                uint64_t *out_n_reads)
+{
+    if (out_ov)       *out_ov = NULL;
+    if (out_n_ov)     *out_n_ov = 0;
+    if (out_names)    *out_names = NULL;
+    if (out_name_off) *out_name_off = NULL;
+    if (out_n_reads)  *out_n_reads = 0;
+
+    if (read_files == NULL || n_read_files < 1 ||
+        out_ov == NULL || out_n_ov == NULL ||
+        out_names == NULL || out_name_off == NULL || out_n_reads == NULL) {
+        fprintf(stderr, "[hifiasm_detect_overlaps_mem] invalid arguments\n");
+        return 1;
+    }
+
+    /* Same argv the file path builds, minus -o/<prefix>: the sink replaces the
+     * output file, so ha_detect_candidates() writes nothing. A placeholder
+     * prefix is still supplied because some option/coverage logic references
+     * asm_opt.output_file_name; no file is opened while the sink is active. */
+    int    argc = 0;
+    int    max_argc = 16 + n_read_files;
+    char **argv = (char**)calloc(max_argc, sizeof(char*));
+
+    char threads_buf[16], k_buf[16], w_buf[32], d_buf[32];
+    int  threads = (opt && opt->threads > 0) ? opt->threads : 1;
+    snprintf(threads_buf, sizeof(threads_buf), "%d", threads);
+
+    argv[argc++] = (char*)"hifiasm";
+    argv[argc++] = (char*)"-o";
+    argv[argc++] = (char*)"hifiasm.mem";   /* placeholder; no file is written */
+    argv[argc++] = (char*)"-t";
+    argv[argc++] = threads_buf;
+
+    if (opt && opt->is_ont)          argv[argc++] = (char*)"--ont";
+    if (opt && opt->k_mer_length > 0) {
+        snprintf(k_buf, sizeof(k_buf), "%d", opt->k_mer_length);
+        argv[argc++] = (char*)"-k"; argv[argc++] = k_buf;
+    }
+    if (opt && opt->mz_win > 0) {
+        snprintf(w_buf, sizeof(w_buf), "%d", opt->mz_win);
+        argv[argc++] = (char*)"-w"; argv[argc++] = w_buf;
+    }
+    if (opt && opt->max_ov_diff > 0.0) {
+        snprintf(d_buf, sizeof(d_buf), "%g", opt->max_ov_diff);
+        argv[argc++] = (char*)"--max-od-ec"; argv[argc++] = d_buf;
+    }
+    if (opt && opt->raw_candidates) argv[argc++] = (char*)"--dbg-ovec";
+
+    for (int i = 0; i < n_read_files; ++i)
+        argv[argc++] = (char*)read_files[i];
+
+    reset_read_store();
+    yak_reset_realtime();
+    init_opt(&asm_opt);
+    int ok = CommandLine_process(argc, argv, &asm_opt);
+    if (!ok) {
+        free(argv);
+        fprintf(stderr, "[hifiasm_detect_overlaps_mem] option processing failed\n");
+        return 2;
+    }
+
+    hifiasm_ovlp_sink_begin();
+    int ret = ha_detect_candidates();   /* emitters push into the sink */
+    hifiasm_ovlp_sink_end(out_ov, out_n_ov, out_names, out_name_off, out_n_reads);
+
+    destory_opt(&asm_opt);
+    free(argv);
+
+    if (ret != 0) {
+        hifiasm_overlaps_mem_free(*out_ov, *out_names, *out_name_off);
+        *out_ov = NULL; *out_n_ov = 0;
+        *out_names = NULL; *out_name_off = NULL; *out_n_reads = 0;
+        fprintf(stderr, "[hifiasm_detect_overlaps_mem] pipeline failed (%d)\n", ret);
+        return ret;
+    }
+    return 0;
+}
+
+void hifiasm_overlaps_mem_free(hifiasm_overlap_t *ov,
+                               char *names,
+                               uint64_t *name_off)
+{
+    free(ov);
+    free(names);
+    free(name_off);
 }
 
 /*

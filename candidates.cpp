@@ -29,6 +29,7 @@
 #include "htab.h"
 #include "kthread.h"
 #include "ksort.h"
+#include "hifiasm_overlaps_internal.h"
 
 // ---------------------------------------------------------------------------
 // Globals that the candidate path expects to be defined in the driver TU.
@@ -150,6 +151,25 @@ static FILE *g_out_fp = NULL;
 static void emit_candidates(overlap_region_alloc *ol)
 {
     if (ol->length == 0) return;
+
+    // In-memory path: push each overlap into the sink instead of writing PAF.
+    // The sink serializes internally, so no g_out_mtx is needed here. Fields
+    // match the PAF columns below exactly (same +1 half-open end convention).
+    if (hifiasm_ovlp_sink_active()) {
+        for (uint64_t k = 0; k < ol->length; ++k) {
+            overlap_region *o = &ol->list[k];
+            uint32_t span = (o->x_pos_e >= o->x_pos_s) ? (o->x_pos_e - o->x_pos_s + 1) : 0;
+            hifiasm_ovlp_sink_push(
+                o->x_id, o->y_id,
+                o->x_pos_s, o->x_pos_e + 1,
+                o->y_pos_s, o->y_pos_e + 1,
+                o->shared_seed > 0 ? (uint32_t)o->shared_seed : 0,
+                span,
+                (uint8_t)(o->y_pos_strand == 0));
+        }
+        return;
+    }
+
     pthread_mutex_lock(&g_out_mtx);
     for (uint64_t k = 0; k < ol->length; ++k) {
         overlap_region *o = &ol->list[k];
@@ -207,23 +227,33 @@ void cal_ec_r_dbg(uint64_t n_thre, uint64_t n_a);
 // Raw candidate detection (no alignment): writes <prefix>.candidates.paf.
 static int detect_candidates_raw(void)
 {
-    // output file: <output_file_name>.candidates.paf
-    char *paf = (char*)malloc(strlen(asm_opt.output_file_name) + 32);
-    sprintf(paf, "%s.candidates.paf", asm_opt.output_file_name);
-    g_out_fp = fopen(paf, "w");
-    if (!g_out_fp) {
-        fprintf(stderr, "[M::%s] ERROR: cannot open %s for writing\n", __func__, paf);
-        free(paf);
-        return 1;
+    // In-memory path: no PAF file; emit_candidates() pushes into the sink.
+    const int toMem = hifiasm_ovlp_sink_active();
+    char *paf = NULL;
+    if (!toMem) {
+        // output file: <output_file_name>.candidates.paf
+        paf = (char*)malloc(strlen(asm_opt.output_file_name) + 32);
+        sprintf(paf, "%s.candidates.paf", asm_opt.output_file_name);
+        g_out_fp = fopen(paf, "w");
+        if (!g_out_fp) {
+            fprintf(stderr, "[M::%s] ERROR: cannot open %s for writing\n", __func__, paf);
+            free(paf);
+            return 1;
+        }
     }
 
     cand_bufs_t *bufs = cand_bufs_init(asm_opt.thread_num);
     kt_for(asm_opt.thread_num, worker_candidates, bufs, R_INF.total_reads);
     cand_bufs_destroy(bufs);
 
-    fclose(g_out_fp);
-    fprintf(stderr, "[M::%s] candidate overlaps written to %s\n", __func__, paf);
-    free(paf);
+    if (!toMem) {
+        fclose(g_out_fp);
+        g_out_fp = NULL;
+        fprintf(stderr, "[M::%s] candidate overlaps written to %s\n", __func__, paf);
+        free(paf);
+    } else {
+        fprintf(stderr, "[M::%s] candidate overlaps collected in memory\n", __func__);
+    }
     return 0;
 }
 
@@ -265,6 +295,12 @@ int ha_detect_candidates(void)
         fprintf(stderr, "[M::%s] overlaps written to %s.ovlp.paf\n",
                 __func__, asm_opt.output_file_name);
     }
+
+    // Snapshot the read-name table for the in-memory path before R_INF is torn
+    // down, so the caller can resolve overlap read indices to its own ids by
+    // name. No-op when the sink is inactive (file path).
+    hifiasm_ovlp_sink_capture_names(R_INF.name, R_INF.name_index,
+                                    R_INF.total_reads, R_INF.total_name_length);
 
     // 4) cleanup
     ha_pt_destroy(ha_idx); ha_idx = NULL;

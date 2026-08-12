@@ -6,6 +6,7 @@
 #include "ecovlp.h"
 #include "kthread.h"
 #include "htab.h"
+#include "hifiasm_overlaps_internal.h"
 #define HA_KMER_GOOD_RATIO 0.333
 #define E_KHIT 31
 #define CNS_DEL_E (0x7fffffffu)
@@ -754,6 +755,7 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
     } else if (step == 2) { // step 3: dump
         cal_ec_r_dbg_step_t *s = (cal_ec_r_dbg_step_t*)in; uint64_t k, z; bit_extz_t ez; memset(&ez, 0, sizeof(ez));
         // UC_Read qu; UC_Read tu; init_UC_Read(&qu); init_UC_Read(&tu); 
+        const int toMem = hifiasm_ovlp_sink_active();
         for (k = 0; k < p->n_thread; k++) {
             for (z = 0; z < s->res[k].n; z++) {
                 ez.cigar.a = s->res[k].ec.a + s->res[k].a[z].bl; ez.cigar.n = ez.cigar.m = s->res[k].a[z].cc;
@@ -764,8 +766,28 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
                 // UC_Read_resize(tu, (s->res[k].a[z].te - s->res[k].a[z].ts));
                 // recover_UC_Read_sub_region(tu.seq, s->res[k].a[z].ts, s->res[k].a[z].te - s->res[k].a[z].ts, 0, &R_INF, s->res[k].a[z].tn); 
 
-                print_ov_dbg_paf(p->fp, NULL/**qu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].qns>>32)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), 
-                            NULL/**tu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].tn)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].tn)), (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe, Get_READ_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), s->res[k].a[z].ts, s->res[k].a[z].te, Get_READ_LENGTH(R_INF, (s->res[k].a[z].tn)), s->res[k].a[z].rev, &ez, cm);
+                if (toMem) {
+                    // In-memory path: compute matches / block length from the
+                    // CIGAR exactly as print_ov_dbg_paf does, then push. q is
+                    // the PAF query (qns>>32), t the target (tn).
+                    uint64_t ci = 0; uint16_t c; uint32_t cl;
+                    uint64_t n_match = 0, blk_len = 0;
+                    for (ci = 0; ci < ez.cigar.n; ) {
+                        ci = pop_trace(&(ez.cigar), ci, &c, &cl);
+                        if (cm[c] == '=') n_match += cl;
+                        blk_len += cl;
+                    }
+                    hifiasm_ovlp_sink_push(
+                        (uint32_t)(s->res[k].a[z].qns >> 32),
+                        s->res[k].a[z].tn,
+                        (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe,
+                        s->res[k].a[z].ts, s->res[k].a[z].te,
+                        (uint32_t)n_match, (uint32_t)blk_len,
+                        (uint8_t)(s->res[k].a[z].rev == 0));
+                } else {
+                    print_ov_dbg_paf(p->fp, NULL/**qu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].qns>>32)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), 
+                                NULL/**tu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].tn)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].tn)), (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe, Get_READ_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), s->res[k].a[z].ts, s->res[k].a[z].te, Get_READ_LENGTH(R_INF, (s->res[k].a[z].tn)), s->res[k].a[z].rev, &ez, cm);
+                }
             }
             free(s->res[k].a); free(s->res[k].ec.a);
         }
@@ -776,15 +798,22 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
 
 void cal_ec_r_dbg(uint64_t n_thre, uint64_t n_a)
 {
-    char *paf = NULL; MALLOC(paf, (strlen(asm_opt.output_file_name)+64));
-    sprintf(paf, "%s.ovlp.paf", asm_opt.output_file_name); 
+    // In-memory path: the dump step pushes into the sink, so no PAF file is
+    // opened and sl.fp stays NULL.
+    const int toMem = hifiasm_ovlp_sink_active();
+    char *paf = NULL;
 
     cal_ec_r_dbg_t sl; memset(&sl, 0, sizeof(sl));
-    sl.n_thread = n_thre; sl.n_a = n_a; sl.chunk_size = 2000; sl.cn = 0; sl.fp = fopen(paf, "w");
+    sl.n_thread = n_thre; sl.n_a = n_a; sl.chunk_size = 2000; sl.cn = 0;
+    if (!toMem) {
+        MALLOC(paf, (strlen(asm_opt.output_file_name)+64));
+        sprintf(paf, "%s.ovlp.paf", asm_opt.output_file_name);
+        sl.fp = fopen(paf, "w");
+    }
 
     kt_pipeline(3, worker_ov_dbg_pipeline, &sl, 3);
 
-    fclose(sl.fp); free(paf);
+    if (!toMem) { fclose(sl.fp); free(paf); }
 }
 
 

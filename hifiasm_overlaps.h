@@ -61,6 +61,85 @@ int hifiasm_detect_overlaps(const char *const *read_files,
                             char **out_paf_path);
 
 /*
+ * One overlap returned by hifiasm_detect_overlaps_mem(). Fields mirror the PAF
+ * columns the file-based path writes, so a caller can build the same records it
+ * would have parsed from "<prefix>.ovlp.paf" without the text round-trip:
+ *
+ *   q_id, t_id       : read indices into the returned name table (see below).
+ *                      q is the PAF query, t the PAF target.
+ *   q_start, q_end   : half-open query interval [q_start, q_end) on the
+ *                      forward strand of read q_id (PAF cols 3-4).
+ *   t_start, t_end   : half-open target interval [t_start, t_end) on the
+ *                      forward strand of read t_id (PAF cols 8-9). These are
+ *                      forward-strand coordinates for both orientations, exactly
+ *                      as the PAF path emits them.
+ *   n_match          : residue matches (PAF col 10).
+ *   block_len        : alignment block length (PAF col 11); the same value the
+ *                      file path uses as the chain score / length filter key.
+ *   is_same_strand   : 1 if the overlap is forward-forward (PAF strand '+'),
+ *                      0 if reverse-complement (PAF strand '-').
+ */
+typedef struct {
+    uint32_t q_id;
+    uint32_t t_id;
+    uint32_t q_start;
+    uint32_t q_end;
+    uint32_t t_start;
+    uint32_t t_end;
+    uint32_t n_match;
+    uint32_t block_len;
+    uint8_t  is_same_strand;
+} hifiasm_overlap_t;
+
+/*
+ * Run overlap detection and return the overlaps IN MEMORY instead of writing a
+ * PAF file. This is the deep-integration path: it runs the same pipeline as
+ * hifiasm_detect_overlaps() (candidate detection + base-level alignment/filter,
+ * or the raw pre-alignment set when opt->raw_candidates is set), but hands the
+ * surviving overlaps back as an array plus the read-name table, so the caller
+ * resolves q_id/t_id to its own read ids by NAME (robust to load order) exactly
+ * as it would when parsing the PAF.
+ *
+ *   read_files    : input read file paths (FASTA/FASTQ[.gz])
+ *   n_read_files  : number of entries (>= 1)
+ *   opt           : options (may be NULL for all-defaults, HiFi, 1 thread)
+ *   out_ov        : receives a malloc()'d array of hifiasm_overlap_t.
+ *                   *out_ov is NULL when there are zero overlaps.
+ *   out_n_ov      : receives the number of overlaps in *out_ov.
+ *   out_names     : receives a malloc()'d char buffer holding every read name
+ *                   concatenated (NOT individually NUL-terminated).
+ *   out_name_off  : receives a malloc()'d array of (*out_n_reads + 1) offsets
+ *                   into *out_names; read i's name is the byte range
+ *                   [out_name_off[i], out_name_off[i+1]). This mirrors
+ *                   hifiasm's internal name_index layout.
+ *   out_n_reads   : receives the number of reads (== hifiasm's total_reads).
+ *
+ * Ownership: on success the caller owns *out_ov, *out_names and *out_name_off
+ * and must release them with hifiasm_overlaps_mem_free(). Returns 0 on success,
+ * non-zero on error (in which case all out-params are set to NULL/0).
+ *
+ * NOTE: like hifiasm_detect_overlaps(), this uses hifiasm's process-global
+ * option and read stores and is NOT thread-safe; do not call it concurrently
+ * with other bridge entry points that touch those globals.
+ */
+int hifiasm_detect_overlaps_mem(const char *const *read_files,
+                                int n_read_files,
+                                const hifiasm_ovlp_opt_t *opt,
+                                hifiasm_overlap_t **out_ov,
+                                uint64_t *out_n_ov,
+                                char **out_names,
+                                uint64_t **out_name_off,
+                                uint64_t *out_n_reads);
+
+/*
+ * Release the three buffers returned by hifiasm_detect_overlaps_mem(). Any
+ * argument may be NULL (no-op for that one). Safe to call with all-NULL.
+ */
+void hifiasm_overlaps_mem_free(hifiasm_overlap_t *ov,
+                               char *names,
+                               uint64_t *name_off);
+
+/*
  * One minimizer produced by hifiasm_sketch_minimizers().
  *
  *   pos : START position of the k-mer on the forward strand of the input
