@@ -15,11 +15,14 @@ It can be used two ways:
 
 ## Output
 
-Overlaps are written to `<prefix>.ovlp.paf`. CIGARs use the extended `=`/`X`
-convention and are carried in the `cg:Z:` tag (`=` match, `X` mismatch,
-`I` insertion, `D` deletion). With `--dbg-ovec` the raw pre-alignment candidate
-set is written to `<prefix>.candidates.paf` instead (no base-level alignment,
-so non-aligning candidates are not dropped).
+Overlaps are written to `<prefix>.ovlp.paf` as standard 12-column PAF: column
+10 is the number of residue matches, column 11 the alignment block length, and
+column 12 the mapping quality (fixed at 255). The extended CIGAR is carried in
+the optional `cg:Z:` tag (column 13) using `=` match, `X` mismatch, `I`
+insertion, `D` deletion. This means any standard PAF reader can consume the
+output. With `--dbg-ovec` the raw pre-alignment candidate set is written to
+`<prefix>.candidates.paf` instead (no base-level alignment, so non-aligning
+candidates are not dropped).
 
 ## Building
 

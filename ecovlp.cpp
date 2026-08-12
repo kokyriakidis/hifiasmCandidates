@@ -709,12 +709,26 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
 
 void print_ov_dbg_paf(FILE *fp, char *ref_str, char *ref_id, int32_t ref_id_n, char *qry_str, char *qry_id, int32_t qry_id_n, uint64_t rs, uint64_t re, uint64_t rl, uint64_t qs, uint64_t qe, uint64_t ql, uint64_t rev, bit_extz_t *ez, char *ezh)
 {
+    // Emit a standard-compliant PAF record. ezh maps cigar ops to characters
+    // as {'=' match, 'X' mismatch, 'I' insertion, 'D' deletion}. The number of
+    // residue matches (col 10) is the total '=' length; the alignment block
+    // length (col 11) is the total over all ops. The extended CIGAR is carried
+    // in the optional cg:Z: tag (col 13), so downstream tools that read the
+    // standard 12 columns work unchanged.
     uint64_t ci = 0; uint16_t c; uint32_t cl;
+    uint64_t n_match = 0, blk_len = 0;
+    for (ci = 0; ci < ez->cigar.n; ) {
+        ci = pop_trace(&(ez->cigar), ci, &c, &cl);
+        if (ezh[c] == '=') n_match += cl;
+        blk_len += cl;
+    }
+
     fprintf(fp, "%.*s\t%lu\t%lu\t%lu\t", qry_id_n, qry_id, ql, qs, qe);
     fprintf(fp, "%c\t", "+-"[rev]);
     fprintf(fp, "%.*s\t%lu\t%lu\t%lu\t", ref_id_n, ref_id, rl, rs, re);
-    fprintf(fp, "255\tcg:Z:");
-    while (ci < ez->cigar.n) {
+    // col 10 matches, col 11 alignment block length, col 12 mapping quality.
+    fprintf(fp, "%lu\t%lu\t255\tcg:Z:", n_match, blk_len);
+    for (ci = 0; ci < ez->cigar.n; ) {
         ci = pop_trace(&(ez->cigar), ci, &c, &cl);
         fprintf(fp, "%u%c", cl, ezh[c]);
     }
