@@ -29,6 +29,26 @@ static void reset_read_store(void)
     memset(&R_INF, 0, sizeof(R_INF));
 }
 
+/* -----------------------------------------------------------------------
+ * Frequency-filter handle
+ * -----------------------------------------------------------------------
+ * ha_ft_gen() returns the raw yak_ft_t as a void*; ha_ft_cnt()/ha_ft_destroy()
+ * take that same void*. We wrap it in an opaque struct so the public API type
+ * is distinct and can grow later (e.g. carry the k/w it was built with for
+ * validation) without changing the ABI. */
+struct hifiasm_filter_s {
+    void *raw; /* yak_ft_t* from ha_ft_gen(); owned by this handle */
+    int   k;   /* k the table was built with (for reference/debugging) */
+    int   w;   /* w the table was built with */
+    int   is_hpc;
+};
+
+/* Unwrap for passing to mz1_ha_sketch (which takes const void*). NULL-safe. */
+static const void *hifiasm_filter_raw(const hifiasm_filter_t *hf)
+{
+    return hf ? hf->raw : NULL;
+}
+
 int hifiasm_detect_overlaps(const char *const *read_files,
                             int n_read_files,
                             const char *output_prefix,
@@ -111,6 +131,132 @@ int hifiasm_detect_overlaps(const char *const *read_files,
     return 0;
 }
 
+/*
+ * Build a high-occurrence k-mer filter table over the given read files.
+ *
+ * Reuses the same argv/CommandLine_process shell as hifiasm_detect_overlaps so
+ * all preset defaults, k/w handling and validation match the CLI, then forces
+ * the k, w, HPC mode and read-length cutoff the caller asked for and calls
+ * ha_ft_gen(read_from_store=0), which streams the read files, records read
+ * lengths/names in R_INF, and builds the filter table.
+ *
+ * Only the filter table is kept; R_INF (lengths/names) is dropped before
+ * returning, so nothing genome-scale outlives the call except the table
+ * itself.
+ */
+hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
+                                       int n_read_files,
+                                       const hifiasm_filter_opt_t *opt)
+{
+    if (read_files == NULL || n_read_files < 1) {
+        fprintf(stderr, "[hifiasm_build_filter] invalid arguments\n");
+        return NULL;
+    }
+
+    int k       = (opt && opt->k_mer_length > 0) ? opt->k_mer_length : 50;
+    int w       = (opt && opt->mz_win       > 0) ? opt->mz_win       : 50;
+    int is_hpc  = (opt && opt->is_hpc) ? 1 : 0;
+    int threads = (opt && opt->threads > 0) ? opt->threads : 1;
+    /* Default: keep every read (rl_cut < 0) so the counted set matches every
+     * read the caller will later sketch. A caller that deliberately mirrors
+     * hifiasm's own length cutoff can request it via min_read_len >= 0. */
+    int64_t rl_cut = (opt && opt->min_read_len >= 0) ? opt->min_read_len : -1;
+
+    /* -------- build an argv equivalent to a CLI invocation -------- */
+    int    argc = 0;
+    int    max_argc = 12 + n_read_files;
+    char **argv = (char**)calloc(max_argc, sizeof(char*));
+    if (argv == NULL) {
+        fprintf(stderr, "[hifiasm_build_filter] out of memory\n");
+        return NULL;
+    }
+
+    char threads_buf[16], k_buf[16], w_buf[16];
+    snprintf(threads_buf, sizeof(threads_buf), "%d", threads);
+    snprintf(k_buf, sizeof(k_buf), "%d", k);
+    snprintf(w_buf, sizeof(w_buf), "%d", w);
+
+    argv[argc++] = (char*)"hifiasm";
+    argv[argc++] = (char*)"-o";
+    argv[argc++] = (char*)"hifiasm_filter"; /* prefix; no files are written */
+    argv[argc++] = (char*)"-t";
+    argv[argc++] = threads_buf;
+    argv[argc++] = (char*)"-k"; argv[argc++] = k_buf;
+    argv[argc++] = (char*)"-w"; argv[argc++] = w_buf;
+    for (int i = 0; i < n_read_files; ++i)
+        argv[argc++] = (char*)read_files[i];
+
+    /* -------- run option processing + table build -------- */
+    reset_read_store();
+    yak_reset_realtime();
+    init_opt(&asm_opt);
+    int ok = CommandLine_process(argc, argv, &asm_opt);
+    if (!ok) {
+        free(argv);
+        fprintf(stderr, "[hifiasm_build_filter] option processing failed\n");
+        return NULL;
+    }
+
+    /* Force the exact sketch parameters. CommandLine_process may have applied
+     * preset k/w; override so the filter's k/w/HPC match what we will sketch
+     * with. HA_F_NO_HPC controls HPC mode inside ha_ft_gen via ha_count. */
+    asm_opt.k_mer_length = k;
+    asm_opt.mz_win       = w;
+    if (is_hpc) asm_opt.flag &= ~HA_F_NO_HPC;
+    else        asm_opt.flag |=  HA_F_NO_HPC;
+    asm_opt.rl_cut = rl_cut;
+
+    int hom_cov = -1;
+    /* read_from_store=0: stream the files, writing read lengths (not
+     * sequences) into R_INF and building the high-occurrence table. */
+    void *raw = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, /*is_hp_mode*/ 0,
+                          /*read_from_store*/ 0);
+
+    /* Drop the transient store. ha_ft_gen with read_from_store=0 uses
+     * HAF_RS_WRITE_LEN, so init_All_reads ran (allocating read_length and
+     * name_index) but malloc_All_reads did NOT (N_site, read_sperate, paf,
+     * name, ... are still NULL). destory_All_reads would dereference those
+     * NULL per-read arrays while total_reads>0, so free only what was actually
+     * allocated here, then zero the store. */
+    free(R_INF.read_length);
+    free(R_INF.name_index);
+    reset_read_store();
+    destory_opt(&asm_opt);
+    free(argv);
+
+    if (raw == NULL) {
+        fprintf(stderr, "[hifiasm_build_filter] filter table build failed\n");
+        return NULL;
+    }
+
+    hifiasm_filter_t *hf = (hifiasm_filter_t*)calloc(1, sizeof(*hf));
+    if (hf == NULL) {
+        ha_ft_destroy(raw);
+        fprintf(stderr, "[hifiasm_build_filter] out of memory\n");
+        return NULL;
+    }
+    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc;
+    return hf;
+}
+
+void hifiasm_filter_destroy(hifiasm_filter_t *hf)
+{
+    if (hf == NULL) return;
+    ha_ft_destroy(hf->raw);
+    free(hf);
+}
+
+int32_t hifiasm_filter_count(const hifiasm_filter_t *hf, uint64_t hash)
+{
+    if (hf == NULL || hf->raw == NULL) return 0;
+    return ha_ft_cnt(hf->raw, hash);
+}
+
+const void *hifiasm_filter_raw_for_test(const hifiasm_filter_t *hf)
+{
+    return hifiasm_filter_raw(hf);
+}
+
 /* Order minimizers by ascending START position, breaking ties by hash so the
  * output is deterministic regardless of the sketcher's emission order. */
 static int cmp_minimizer_by_pos(const void *pa, const void *pb)
@@ -156,8 +302,16 @@ void hifiasm_sketch_ctx_destroy(hifiasm_sketch_ctx_t *ctx)
  * ctx->out, owned by the ctx) and *out_n. Shared by the context and one-shot
  * public entry points.
  */
+/* hifiasm's overlap sketch passes asm_opt.mz_rewin as the select_mz_h window
+ * (see anchor.cpp; sketch.cpp threads it in as the sketch `ws` argument). Its
+ * default is 1000. We reproduce that here so the distance-subsampling stage
+ * matches the overlap path exactly. Only consulted when subsampling is active
+ * (sample_dist > w); ignored otherwise. */
+#define HIFIASM_MZ_REWIN_DEFAULT 1000
+
 static int sketch_into_ctx(hifiasm_sketch_ctx_t *ctx,
                            const char *seq, int len, int w, int k, int is_hpc,
+                           const void *hf, int sample_dist, int ws,
                            const hifiasm_minimizer_t **out_mz, int *out_n)
 {
     *out_mz = NULL;
@@ -179,15 +333,21 @@ static int sketch_into_ctx(hifiasm_sketch_ctx_t *ctx,
     ctx->mz.n = 0;
     ctx->mt.n = 0;
 
-    /* hf=NULL           -> no frequency filter (cnt always 0, nothing dropped)
-     * sample_dist=0     -> skips select_mz_h subsampling (needs sample_dist>w)
-     * pt=NULL, dp_min_len=-1 -> skips refine_sketch
-     * is_unique=0, dp_e=-1, ws ignored without subsampling.
-     * So the result depends only on (seq, len, w, k, is_hpc). */
+    /* Filter parameters (see hifiasm_sketch_minimizers_ctx_filtered):
+     *   hf          -> frequency filter; NULL means no filtering (cnt always 0).
+     *   sample_dist -> distance subsampling via select_mz_h, active only when
+     *                  sample_dist > w. <=0 disables it.
+     *   ws          -> select_mz_h window; hifiasm's overlap path uses
+     *                  asm_opt.mz_rewin (default 1000). Only consulted when
+     *                  subsampling is active.
+     * pt=NULL, dp_min_len=-1 -> refine_sketch never runs (matches the overlap
+     * sketch, which also passes pt=NULL). is_unique=0, dp_e=-1.
+     * With hf=NULL and sample_dist<=0 the result depends only on
+     * (seq, len, w, k, is_hpc), i.e. the raw unfiltered sketch. */
     mz1_ha_sketch(seq, len, w, k, /*rid*/ 0, is_hpc ? 1 : 0, &ctx->mz,
-                  /*hf*/ NULL, /*sample_dist*/ 0, /*k_flag*/ NULL,
+                  hf, sample_dist, /*k_flag*/ NULL,
                   /*dbg_ct*/ NULL, /*pt*/ NULL, /*min_freq*/ -1,
-                  /*dp_min_len*/ -1, /*dp_e*/ -1.0f, &ctx->mt, /*ws*/ w,
+                  /*dp_min_len*/ -1, /*dp_e*/ -1.0f, &ctx->mt, ws,
                   /*is_unique*/ 0, /*km*/ NULL);
 
     const uint32_t n = ctx->mz.n;
@@ -255,7 +415,36 @@ int hifiasm_sketch_minimizers_ctx(hifiasm_sketch_ctx_t *ctx,
         fprintf(stderr, "[hifiasm_sketch_minimizers_ctx] invalid arguments\n");
         return 1;
     }
-    return sketch_into_ctx(ctx, seq, len, w, k, is_hpc, out_mz, out_n);
+    /* Unfiltered: hf=NULL, sample_dist=0 (subsampling off), ws unused. */
+    return sketch_into_ctx(ctx, seq, len, w, k, is_hpc,
+                           /*hf*/ NULL, /*sample_dist*/ 0, /*ws*/ w,
+                           out_mz, out_n);
+}
+
+int hifiasm_sketch_minimizers_ctx_filtered(hifiasm_sketch_ctx_t *ctx,
+                                           const char *seq,
+                                           int len,
+                                           int w,
+                                           int k,
+                                           int is_hpc,
+                                           const hifiasm_filter_t *hf,
+                                           int sample_dist,
+                                           const hifiasm_minimizer_t **out_mz,
+                                           int *out_n)
+{
+    if (out_mz) *out_mz = NULL;
+    if (out_n)  *out_n  = 0;
+    if (ctx == NULL || out_mz == NULL || out_n == NULL) {
+        fprintf(stderr,
+                "[hifiasm_sketch_minimizers_ctx_filtered] invalid arguments\n");
+        return 1;
+    }
+    /* hifiasm_filter_t wraps the raw yak_ft_t that mz1_ha_sketch expects as a
+     * const void*; unwrap it here. NULL hf is allowed and disables frequency
+     * filtering (subsampling may still apply). */
+    return sketch_into_ctx(ctx, seq, len, w, k, is_hpc,
+                           hifiasm_filter_raw(hf), sample_dist,
+                           /*ws*/ HIFIASM_MZ_REWIN_DEFAULT, out_mz, out_n);
 }
 
 int hifiasm_sketch_minimizers(const char *seq,
@@ -278,7 +467,8 @@ int hifiasm_sketch_minimizers(const char *seq,
     hifiasm_sketch_ctx_t ctx = {{0, 0, NULL}, {0, 0, NULL}, NULL, 0};
     const hifiasm_minimizer_t *mz = NULL;
     int n = 0;
-    int rc = sketch_into_ctx(&ctx, seq, len, w, k, is_hpc, &mz, &n);
+    int rc = sketch_into_ctx(&ctx, seq, len, w, k, is_hpc,
+                             /*hf*/ NULL, /*sample_dist*/ 0, /*ws*/ w, &mz, &n);
     if (rc != 0 || n == 0) {
         free(ctx.mz.a); free(ctx.mt.a); free(ctx.out);
         return rc;

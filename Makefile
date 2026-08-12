@@ -22,7 +22,7 @@ ifneq ($(asan),)
 endif
 
 .SUFFIXES:.cpp .c .o
-.PHONY:all clean depend
+.PHONY:all clean depend test
 
 .cpp.o:
 		$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $< -o $@
@@ -43,8 +43,31 @@ lib:$(LIB)
 $(LIB):$(OBJS)
 		$(AR) rcs $@ $^
 
+# Standalone bridge tests/benchmarks. Each links the C API static library.
+# test_sketch_minimizers : unfiltered no-HPC minimizer bridge
+# test_sketch_filter      : overlap-parity filter (hf + subsampling), incl. a
+#                           direct parity check against mz1_ha_sketch
+# bench_sketch_filter     : marker-count / timing comparison filtered vs not
+TEST_CXXFLAGS=-std=c++11 -O2
+TEST_LIBS=-lz -lpthread -lm
+
+test_sketch_minimizers:test_sketch_minimizers.cpp $(LIB)
+		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
+
+test_sketch_filter:test_sketch_filter.cpp $(LIB)
+		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
+
+bench_sketch_filter:bench_sketch_filter.cpp $(LIB)
+		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
+
+# Build and run the correctness tests.
+test:test_sketch_minimizers test_sketch_filter
+		./test_sketch_minimizers
+		./test_sketch_filter
+
 clean:
-		rm -fr gmon.out *.o a.out $(EXE) *~ *.a *.dSYM
+		rm -fr gmon.out *.o a.out $(EXE) *~ *.a *.dSYM \
+			test_sketch_minimizers test_sketch_filter bench_sketch_filter
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CPPFLAGS) $(DFLAGS) -- *.cpp)

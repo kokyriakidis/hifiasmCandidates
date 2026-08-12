@@ -7,6 +7,11 @@ build/
 # Compiled test/bench harnesses (source .cpp is tracked, binaries are not).
 test_sketch_minimizers
 bench_sketch_minimizers
+test_sketch_filter
+bench_sketch_filter
+# Core dumps.
+core
+core.*
 *.fastq
 *.fastq.gz
 *.fq

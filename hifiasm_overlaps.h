@@ -116,6 +116,98 @@ int hifiasm_sketch_minimizers(const char *seq,
                               int *out_n);
 
 /*
+ * ---------------------------------------------------------------------------
+ * Frequency-filter handle (for marker generation with overlap-path parity)
+ * ---------------------------------------------------------------------------
+ *
+ * hifiasm's overlap path does not sketch reads raw: it first builds a
+ * high-occurrence k-mer table ("hf") over all reads and, while sketching,
+ * drops any minimizer whose k-mer occurs too frequently (repeats, low-signal
+ * seeds). It then subsamples the survivors by genomic distance. A caller that
+ * wants its markers to match hifiasm's overlap seeds must apply the same two
+ * filters.
+ *
+ * This handle wraps that hf table. Build it once over the read set with
+ * hifiasm_build_filter(), then pass it (together with a sample distance) to
+ * hifiasm_sketch_minimizers_ctx_filtered() for each read. The table is a
+ * standalone hash of k-mer values with no dependency on hifiasm's internal
+ * read store, so it can outlive the build call and be shared read-only across
+ * threads.
+ *
+ * IMPORTANT: the filter is k/w/HPC-specific. Build it with the SAME k, w and
+ * is_hpc you will sketch with, or the frequency counts won't correspond to the
+ * minimizers you filter. For dinara's no-HPC marker path that means
+ * k=w=<marker k> and is_hpc=0.
+ */
+typedef struct hifiasm_filter_s hifiasm_filter_t;
+
+/* Options for hifiasm_build_filter(). Zero-initialize and override as needed. */
+typedef struct {
+    int      threads;      /* worker threads for counting (0 -> 1)            */
+    int      k_mer_length; /* k-mer length; MUST match the sketch k (0 -> 50) */
+    int      mz_win;       /* minimizer window; MUST match sketch w (0 -> 50) */
+    int      is_hpc;       /* 1 = HPC counting, 0 = no-HPC (dinara markers)   */
+    int64_t  min_read_len; /* drop reads shorter than this; <0 keeps all.
+                              Pass <0 so the count set matches every read you
+                              intend to sketch (default: keep all).           */
+} hifiasm_filter_opt_t;
+
+/*
+ * Build a high-occurrence k-mer filter table over the given read files.
+ *
+ *   read_files   : input read file paths (FASTA/FASTQ[.gz])
+ *   n_read_files : number of entries (>= 1)
+ *   opt          : options (NULL -> defaults: 1 thread, k=w=50, no-HPC,
+ *                  keep all reads)
+ *
+ * Returns a filter handle on success, NULL on failure. Free it with
+ * hifiasm_filter_destroy().
+ *
+ * NOTE: like hifiasm_detect_overlaps(), this uses hifiasm's process-global
+ * option and read stores while it runs and is NOT thread-safe; do not call it
+ * concurrently with other bridge entry points that touch those globals. The
+ * RETURNED handle, however, is independent of those globals and is safe to use
+ * concurrently from many sketch threads once built.
+ */
+hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
+                                       int n_read_files,
+                                       const hifiasm_filter_opt_t *opt);
+
+/* Destroy a filter handle. NULL is accepted (no-op). */
+void hifiasm_filter_destroy(hifiasm_filter_t *hf);
+
+/*
+ * A k-mer whose occurrence count is >= HIFIASM_FILTER_HIGH_OCC is considered
+ * high-occurrence and is dropped as a minimizer seed by the filtered sketch.
+ * This mirrors the internal threshold hifiasm's sketcher uses.
+ */
+#define HIFIASM_FILTER_HIGH_OCC (1 << 28)
+
+/*
+ * Look up the occurrence count recorded for a k-mer hash in the filter table.
+ *
+ *   hf   : filter handle (NULL -> returns 0)
+ *   hash : the `hash` field of a hifiasm_minimizer_t (hifiasm's canonical yak
+ *          hash, which is exactly the key this table is indexed by)
+ *
+ * Returns the recorded count, or a value >= HIFIASM_FILTER_HIGH_OCC for k-mers
+ * marked high-occurrence (these are the seeds the filtered sketch drops), or 0
+ * for k-mers not present in the table (rare k-mers below the counting floor).
+ *
+ * Mainly useful for inspection/testing: a minimizer emitted by
+ * hifiasm_sketch_minimizers_ctx_filtered() with this same hf must always have
+ * a count < HIFIASM_FILTER_HIGH_OCC.
+ */
+int32_t hifiasm_filter_count(const hifiasm_filter_t *hf, uint64_t hash);
+
+/*
+ * Test-only: return the raw underlying yak filter table (const void*) so tests
+ * can call hifiasm's mz1_ha_sketch directly with the same hf the bridge uses,
+ * and assert bit-for-bit parity. Not intended for production callers; NULL-safe.
+ */
+const void *hifiasm_filter_raw_for_test(const hifiasm_filter_t *hf);
+
+/*
  * Reusable sketch context.
  *
  * hifiasm_sketch_minimizers() allocates and frees its work buffers on every
@@ -157,6 +249,38 @@ int hifiasm_sketch_minimizers_ctx(hifiasm_sketch_ctx_t *ctx,
                                   int is_hpc,
                                   const hifiasm_minimizer_t **out_mz,
                                   int *out_n);
+
+/*
+ * Like hifiasm_sketch_minimizers_ctx(), but applies hifiasm's overlap-path
+ * minimizer filters so the output matches the seeds hifiasm uses for overlap
+ * detection:
+ *
+ *   1. Frequency filter: drops any minimizer whose k-mer is marked
+ *      high-occurrence in `hf`. Pass the handle from hifiasm_build_filter(),
+ *      built with the SAME k/w/is_hpc used here. hf may be NULL to skip this
+ *      filter (then this behaves like the unfiltered variant plus subsampling).
+ *   2. Distance subsampling: when sample_dist > w, thins the surviving
+ *      minimizers so roughly one high-quality seed is kept per sample_dist
+ *      bases (hifiasm's select_mz_h). Pass sample_dist <= 0 (or <= w) to skip
+ *      subsampling. hifiasm's overlap default is 500.
+ *
+ * Position-table refinement (hifiasm's optional third stage) is intentionally
+ * NOT applied here: the overlap sketch itself runs with pt=NULL, so this
+ * matches it. Semantics of seq/len/w/k/is_hpc and the returned pointer/lifetime
+ * are identical to hifiasm_sketch_minimizers_ctx().
+ *
+ * Returns 0 on success, non-zero on error.
+ */
+int hifiasm_sketch_minimizers_ctx_filtered(hifiasm_sketch_ctx_t *ctx,
+                                           const char *seq,
+                                           int len,
+                                           int w,
+                                           int k,
+                                           int is_hpc,
+                                           const hifiasm_filter_t *hf,
+                                           int sample_dist,
+                                           const hifiasm_minimizer_t **out_mz,
+                                           int *out_n);
 
 #ifdef __cplusplus
 } /* extern "C" */
