@@ -64,16 +64,22 @@ bench_sketch_filter:bench_sketch_filter.cpp $(LIB)
 test_store_overlaps:test_store_overlaps.cpp $(LIB)
 		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
 
+# test_cli_parity         : file-mem AND store paths vs the original hifiasm CLI
+#                           (needs the $(EXE) binary; builds it first)
+test_cli_parity:test_cli_parity.cpp $(LIB) $(EXE)
+		$(CXX) $(TEST_CXXFLAGS) -I. $< $(LIB) $(TEST_LIBS) -o $@
+
 # Build and run the correctness tests.
-test:test_sketch_minimizers test_sketch_filter test_store_overlaps
+test:test_sketch_minimizers test_sketch_filter test_store_overlaps test_cli_parity
 		./test_sketch_minimizers
 		./test_sketch_filter
 		./test_store_overlaps
+		./test_cli_parity ./$(EXE)
 
 clean:
 		rm -fr gmon.out *.o a.out $(EXE) *~ *.a *.dSYM \
 			test_sketch_minimizers test_sketch_filter bench_sketch_filter \
-			test_store_overlaps
+			test_store_overlaps test_cli_parity
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CPPFLAGS) $(DFLAGS) -- *.cpp)
