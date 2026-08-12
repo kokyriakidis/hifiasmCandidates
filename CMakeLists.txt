@@ -70,15 +70,16 @@ target_link_libraries(hifiasm_overlaps PUBLIC
     ZLIB::ZLIB Threads::Threads m
 )
 
-# The overlap code path references (but never calls) error-correction/assembly
-# symbols in Correct.cpp/ecovlp.cpp. --gc-sections lets the linker drop those
-# unused sections; propagate it to anything that links this library so their
-# final link succeeds without the missing symbols.
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_link_options(hifiasm_overlaps INTERFACE -Wl,--gc-sections)
-endif()
-
+# Note: the dead error-correction/assembly code has been pruned from
+# Correct.cpp/ecovlp.cpp, so this library links standalone without
+# -Wl,--gc-sections. The flag is still applied to our own executable (below)
+# to keep the binary minimal, but it is intentionally NOT propagated as an
+# INTERFACE requirement so consumers (e.g. dinara's whole-program static
+# link) are not forced to enable it.
 if(HIFIASM_OVERLAPS_BUILD_EXE)
     add_executable(hifiasm main.cpp)
     target_link_libraries(hifiasm PRIVATE hifiasm_overlaps)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_link_options(hifiasm PRIVATE -Wl,--gc-sections)
+    endif()
 endif()
