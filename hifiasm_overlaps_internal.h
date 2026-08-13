@@ -33,11 +33,16 @@ int hifiasm_ovlp_sink_active(void);
 /* Append one overlap to the sink. Serialized internally; safe to call from the
  * kt_for/kt_pipeline worker threads. No-op if the sink is not active. Fields
  * mirror hifiasm_overlap_t (see hifiasm_overlaps.h). */
+/* cigar/cigar_len: hifiasm packed uint16_t CIGAR tokens for this overlap (may be
+ * NULL/0 for the raw candidate path). cigar_t_start: the target anchor in the
+ * alignment frame the tokens run in (see hifiasm_overlap_t::cigar_t_start). */
 void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
                             uint32_t q_start, uint32_t q_end,
                             uint32_t t_start, uint32_t t_end,
                             uint32_t n_match, uint32_t block_len,
-                            uint8_t is_same_strand);
+                            uint8_t is_same_strand,
+                            const uint16_t *cigar, uint32_t cigar_len,
+                            uint32_t cigar_t_start);
 
 /* Snapshot the read-name table into the sink. Called once by
  * ha_detect_candidates() just before it tears down R_INF, so the names outlive

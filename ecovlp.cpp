@@ -777,13 +777,23 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
                         if (cm[c] == '=') n_match += cl;
                         blk_len += cl;
                     }
+                    // The CIGAR tokens run in the alignment frame: forward query
+                    // (anchored at qns low bits) against the target in ALIGNMENT
+                    // orientation. ts/te are forward-strand coords (already
+                    // rewritten for rev overlaps), so the target anchor in the
+                    // alignment frame is ts for '+' and (t_len - te) for '-'.
+                    uint32_t t_len = (uint32_t)Get_READ_LENGTH(R_INF, s->res[k].a[z].tn);
+                    uint32_t cig_t_start = (s->res[k].a[z].rev == 0)
+                        ? s->res[k].a[z].ts
+                        : (t_len - s->res[k].a[z].te);
                     hifiasm_ovlp_sink_push(
                         (uint32_t)(s->res[k].a[z].qns >> 32),
                         s->res[k].a[z].tn,
                         (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe,
                         s->res[k].a[z].ts, s->res[k].a[z].te,
                         (uint32_t)n_match, (uint32_t)blk_len,
-                        (uint8_t)(s->res[k].a[z].rev == 0));
+                        (uint8_t)(s->res[k].a[z].rev == 0),
+                        ez.cigar.a, (uint32_t)ez.cigar.n, cig_t_start);
                 } else {
                     print_ov_dbg_paf(p->fp, NULL/**qu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].qns>>32)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), 
                                 NULL/**tu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].tn)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].tn)), (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe, Get_READ_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), s->res[k].a[z].ts, s->res[k].a[z].te, Get_READ_LENGTH(R_INF, (s->res[k].a[z].tn)), s->res[k].a[z].rev, &ez, cm);

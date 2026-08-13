@@ -78,6 +78,27 @@ int hifiasm_detect_overlaps(const char *const *read_files,
  *                      file path uses as the chain score / length filter key.
  *   is_same_strand   : 1 if the overlap is forward-forward (PAF strand '+'),
  *                      0 if reverse-complement (PAF strand '-').
+ *   cigar_offset     : start index of this overlap's CIGAR in the token arena
+ *                      returned via out_cigar (in uint16_t token units).
+ *                      Meaningful only when cigar_len > 0.
+ *   cigar_len        : number of CIGAR tokens for this overlap; 0 if none
+ *                      (e.g. the raw pre-alignment candidate set carries no
+ *                      CIGAR). The tokens are hifiasm's packed uint16_t form
+ *                      (op << 14 | length), op 0='=' (match), 1='X' (mismatch),
+ *                      2='I' (insertion, consumes query), 3='D' (deletion,
+ *                      consumes target) -- the standard SAM/PAF convention.
+ *   cigar_t_start    : the CIGAR's target anchor, in the SAME alignment frame
+ *                      the tokens run in. The tokens align the forward query
+ *                      (anchored at q_start) against the target in ALIGNMENT
+ *                      orientation: for a same-strand overlap this equals
+ *                      t_start; for a reverse-complement overlap the target is
+ *                      reverse-complemented, so cigar_t_start is the offset from
+ *                      the start of the reverse-complemented target (i.e.
+ *                      t_len - t_end), NOT the forward t_start. A consumer that
+ *                      reconstructs the target as the reverse complement for
+ *                      '-' overlaps (as aligners typically do) can walk the
+ *                      tokens directly from (q_start, cigar_t_start) with no
+ *                      token reversal. Meaningful only when cigar_len > 0.
  */
 typedef struct {
     uint32_t q_id;
@@ -89,6 +110,9 @@ typedef struct {
     uint32_t n_match;
     uint32_t block_len;
     uint8_t  is_same_strand;
+    uint64_t cigar_offset;
+    uint32_t cigar_len;
+    uint32_t cigar_t_start;
 } hifiasm_overlap_t;
 
 /*
@@ -113,10 +137,18 @@ typedef struct {
  *                   [out_name_off[i], out_name_off[i+1]). This mirrors
  *                   hifiasm's internal name_index layout.
  *   out_n_reads   : receives the number of reads (== hifiasm's total_reads).
+ *   out_cigar     : receives a malloc()'d uint16_t arena holding every overlap's
+ *                   CIGAR tokens concatenated. Each hifiasm_overlap_t references
+ *                   its slice via (cigar_offset, cigar_len). May be NULL if the
+ *                   caller does not want CIGARs, in which case cigar_len is 0 on
+ *                   every overlap and *out_cigar is NULL. *out_cigar is also
+ *                   NULL when there are zero CIGAR tokens overall.
+ *   out_cigar_len : receives the total number of uint16_t tokens in *out_cigar.
+ *                   May be NULL only if out_cigar is NULL.
  *
- * Ownership: on success the caller owns *out_ov, *out_names and *out_name_off
- * and must release them with hifiasm_overlaps_mem_free(). Returns 0 on success,
- * non-zero on error (in which case all out-params are set to NULL/0).
+ * Ownership: on success the caller owns *out_ov, *out_names, *out_name_off and
+ * *out_cigar and must release them with hifiasm_overlaps_mem_free(). Returns 0
+ * on success, non-zero on error (in which case all out-params are set to NULL/0).
  *
  * NOTE: like hifiasm_detect_overlaps(), this uses hifiasm's process-global
  * option and read stores and is NOT thread-safe; do not call it concurrently
@@ -129,15 +161,19 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
                                 uint64_t *out_n_ov,
                                 char **out_names,
                                 uint64_t **out_name_off,
-                                uint64_t *out_n_reads);
+                                uint64_t *out_n_reads,
+                                uint16_t **out_cigar,
+                                uint64_t *out_cigar_len);
 
 /*
- * Release the three buffers returned by hifiasm_detect_overlaps_mem(). Any
- * argument may be NULL (no-op for that one). Safe to call with all-NULL.
+ * Release the buffers returned by hifiasm_detect_overlaps_mem() /
+ * hifiasm_detect_overlaps_from_store(). Any argument may be NULL (no-op for that
+ * one). Safe to call with all-NULL.
  */
 void hifiasm_overlaps_mem_free(hifiasm_overlap_t *ov,
                                char *names,
-                               uint64_t *name_off);
+                               uint64_t *name_off,
+                               uint16_t *cigar);
 
 
 /* ---------------------------------------------------------------------------
@@ -188,7 +224,9 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
                                        uint64_t *out_n_ov,
                                        char **out_names,
                                        uint64_t **out_name_off,
-                                       uint64_t *out_n_reads);
+                                       uint64_t *out_n_reads,
+                                       uint16_t **out_cigar,
+                                       uint64_t *out_cigar_len);
 
 /* The store-fed filter builder (hifiasm_build_filter_from_store) is declared
  * further down, next to hifiasm_build_filter(), because it shares that

@@ -163,7 +163,8 @@ int main(void)
     hifiasm_overlap_t *fov = NULL; uint64_t fn = 0;
     char *fnames = NULL; uint64_t *foff = NULL; uint64_t fnr = 0;
     int rc = hifiasm_detect_overlaps_mem(files, 1, &opt,
-                                         &fov, &fn, &fnames, &foff, &fnr);
+                                         &fov, &fn, &fnames, &foff, &fnr,
+                                         NULL, NULL);
     CHECK(rc == 0, "file mem path rc==0");
     CHECK(fnr == reads.size(), "file path read count matches input");
 
@@ -192,7 +193,8 @@ int main(void)
     hifiasm_overlap_t *sov = NULL; uint64_t sn = 0;
     char *snames = NULL; uint64_t *soff = NULL; uint64_t snr = 0;
     rc = hifiasm_detect_overlaps_from_store(&opt,
-                                            &sov, &sn, &snames, &soff, &snr);
+                                            &sov, &sn, &snames, &soff, &snr,
+                                            NULL, NULL);
     CHECK(rc == 0, "store overlap path rc==0");
     CHECK(snr == fnr, "store path read count matches file path");
 
@@ -212,11 +214,77 @@ int main(void)
                  (unsigned long long)fn, (unsigned long long)sn,
                  fs.size(), ss.size());
 
-    /* Release everything. */
-    hifiasm_overlaps_mem_free(fov, fnames, foff);
-    hifiasm_overlaps_mem_free(sov, snames, soff);
+    /* Tear down the store and its buffers before running any further file-mem
+     * pipeline. The file-mem path drives the same global R_INF and frees it
+     * internally (candidates.cpp: `if (!from_store) destory_All_reads`), so a
+     * loaded store must be released first or the trailing store_release would
+     * double-free R_INF. */
+    hifiasm_overlaps_mem_free(sov, snames, soff, NULL);
+    sov = NULL; snames = NULL; soff = NULL;
     hifiasm_reads_store_release();
-    /* release() again must be a safe no-op. */
+
+    /* ---- CIGAR passthrough: alignment (non-raw) path ---- */
+    /* The raw candidate set carries no base-level CIGAR, so re-run the file
+     * path WITHOUT raw_candidates to exercise gen_hc_r_alin_ea and assert that
+     * every returned overlap carries a CIGAR whose op spans match its
+     * coordinates, in the SAM/PAF convention (op2='I' consumes query, op3='D'
+     * consumes target). This is what dinara consumes with no op remapping. */
+    {
+        hifiasm_ovlp_opt_t aopt;
+        std::memset(&aopt, 0, sizeof(aopt));
+        aopt.threads = 1;
+        aopt.raw_candidates = 0;   /* run the base-level alignment/filter */
+
+        hifiasm_overlap_t *aov = NULL; uint64_t an = 0;
+        char *anames = NULL; uint64_t *aoff = NULL; uint64_t anr = 0;
+        uint16_t *acig = NULL; uint64_t acig_n = 0;
+        int arc = hifiasm_detect_overlaps_mem(files, 1, &aopt,
+                                              &aov, &an, &anames, &aoff, &anr,
+                                              &acig, &acig_n);
+        CHECK(arc == 0, "alignment path rc==0");
+
+        uint64_t withCigar = 0, spanOk = 0, spanBad = 0;
+        uint64_t maxTokEnd = 0;
+        for (uint64_t i = 0; i < an; ++i) {
+            if (aov[i].cigar_len == 0) continue;
+            ++withCigar;
+            uint64_t end = aov[i].cigar_offset + aov[i].cigar_len;
+            if (end > maxTokEnd) maxTokEnd = end;
+            CHECK(end <= acig_n, "cigar slice within arena");
+
+            /* Decode tokens: op = tok>>14, len = tok & 0x3FFF. Sum the query
+             * and target spans and compare to the overlap coordinates. */
+            uint64_t qSpan = 0, tSpan = 0;
+            for (uint32_t j = 0; j < aov[i].cigar_len; ++j) {
+                uint16_t tok = acig[aov[i].cigar_offset + j];
+                uint8_t  op  = (uint8_t)(tok >> 14);
+                uint32_t len = (uint32_t)(tok & 0x3FFF);
+                switch (op) {
+                    case 0: case 1: qSpan += len; tSpan += len; break; /* =,X */
+                    case 2: qSpan += len; break; /* I: query only */
+                    case 3: tSpan += len; break; /* D: target only */
+                }
+            }
+            uint64_t qCoord = aov[i].q_end - aov[i].q_start;
+            uint64_t tCoord = aov[i].t_end - aov[i].t_start;
+            if (qSpan == qCoord && tSpan == tCoord) ++spanOk; else ++spanBad;
+        }
+        CHECK(withCigar > 0, "alignment path returned at least one CIGAR");
+        CHECK(spanBad == 0, "every CIGAR span matches its overlap coordinates");
+        CHECK(acig == NULL || maxTokEnd <= acig_n, "arena length consistent");
+        std::fprintf(stderr,
+                     "[info] alignment overlaps=%llu withCigar=%llu spanOk=%llu "
+                     "spanBad=%llu tokens=%llu\n",
+                     (unsigned long long)an, (unsigned long long)withCigar,
+                     (unsigned long long)spanOk, (unsigned long long)spanBad,
+                     (unsigned long long)acig_n);
+
+        hifiasm_overlaps_mem_free(aov, anames, aoff, acig);
+    }
+
+    /* Release everything. The store was already released above (before the
+     * CIGAR/file-mem block); calling release() again must be a safe no-op. */
+    hifiasm_overlaps_mem_free(fov, fnames, foff, NULL);
     hifiasm_reads_store_release();
 
     std::remove(tmpl);

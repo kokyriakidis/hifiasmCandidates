@@ -104,7 +104,7 @@ static void run_and_check(const char* fasta, const char* cli_paf,
     /* ---- file-mem path ---- */
     const char* files[1]={fasta};
     hifiasm_overlap_t* fov=0; uint64_t fn=0; char* fnm=0; uint64_t* foff=0; uint64_t fnr=0;
-    int rc=hifiasm_detect_overlaps_mem(files,1,&opt,&fov,&fn,&fnm,&foff,&fnr);
+    int rc=hifiasm_detect_overlaps_mem(files,1,&opt,&fov,&fn,&fnm,&foff,&fnr,NULL,NULL);
     CHECK(rc==0,"file-mem rc==0");
     std::set<Key> fset=to_keys(fov,fn,fnm,foff);
     std::fprintf(stderr,"[%s] file-mem overlaps=%zu\n", tag, fset.size());
@@ -119,15 +119,15 @@ static void run_and_check(const char* fasta, const char* cli_paf,
     rc=hifiasm_reads_store_load(hr.data(),hr.size());
     CHECK(rc==0,"store load rc==0");
     hifiasm_overlap_t* sov=0; uint64_t sn=0; char* snm=0; uint64_t* soff=0; uint64_t snr=0;
-    rc=hifiasm_detect_overlaps_from_store(&opt,&sov,&sn,&snm,&soff,&snr);
+    rc=hifiasm_detect_overlaps_from_store(&opt,&sov,&sn,&snm,&soff,&snr,NULL,NULL);
     CHECK(rc==0,"store rc==0");
     std::set<Key> sset=to_keys(sov,sn,snm,soff);
     std::fprintf(stderr,"[%s] store overlaps=%zu\n", tag, sset.size());
     CHECK(sset==oracle, "store path == CLI");
     CHECK(snr==reads.size(), "store read count matches input");
 
-    hifiasm_overlaps_mem_free(fov,fnm,foff);
-    hifiasm_overlaps_mem_free(sov,snm,soff);
+    hifiasm_overlaps_mem_free(fov,fnm,foff,NULL);
+    hifiasm_overlaps_mem_free(sov,snm,soff,NULL);
     hifiasm_reads_store_release();
 }
 

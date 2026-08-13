@@ -9,6 +9,8 @@ test_sketch_minimizers
 bench_sketch_minimizers
 test_sketch_filter
 bench_sketch_filter
+test_store_overlaps
+test_cli_parity
 # Core dumps.
 core
 core.*
