@@ -425,6 +425,25 @@ int hifiasm_sketch_minimizers_ctx_filtered(hifiasm_sketch_ctx_t *ctx,
                                            const hifiasm_minimizer_t **out_mz,
                                            int *out_n);
 
+/* -----------------------------------------------------------------------------
+ * hifiasm's tuned overlap-path sketch parameters (single source of truth).
+ *
+ * These mirror the defaults hifiasm's own overlap detection uses
+ * (CommandLines.cpp: k_mer_length=51, mz_win=51, mz_sample_dist=500,
+ * mz_rewin=1000). A caller that wants its minimizer selection to match the
+ * seeds hifiasm uses for overlaps should feed exactly these values to the
+ * filtered sketch (k, w, sample_dist) and build the frequency filter at the
+ * same k/w. Keep these in sync with hifiasm's defaults if they ever change.
+ *
+ * Note on subsampling: distance subsampling is applied by the sketch ONLY when
+ * sample_dist > w. With these constants (500 > 51) it is active; a caller that
+ * overrides sample_dist to <= w silently disables it.
+ * -------------------------------------------------------------------------- */
+#define HIFIASM_OVLP_K            51  /* overlap-path k-mer length            */
+#define HIFIASM_OVLP_W            51  /* overlap-path minimizer window        */
+#define HIFIASM_OVLP_SAMPLE_DIST 500 /* overlap-path distance subsampling    */
+#define HIFIASM_OVLP_REWIN      1000 /* overlap-path select_mz_h window (ws)  */
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

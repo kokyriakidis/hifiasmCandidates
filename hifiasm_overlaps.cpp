@@ -782,11 +782,12 @@ void hifiasm_sketch_ctx_destroy(hifiasm_sketch_ctx_t *ctx)
  * public entry points.
  */
 /* hifiasm's overlap sketch passes asm_opt.mz_rewin as the select_mz_h window
- * (see anchor.cpp; sketch.cpp threads it in as the sketch `ws` argument). Its
- * default is 1000. We reproduce that here so the distance-subsampling stage
- * matches the overlap path exactly. Only consulted when subsampling is active
- * (sample_dist > w); ignored otherwise. */
-#define HIFIASM_MZ_REWIN_DEFAULT 1000
+ * (see anchor.cpp; sketch.cpp threads it in as the sketch `ws` argument). We
+ * reproduce that here so the distance-subsampling stage matches the overlap
+ * path exactly. Only consulted when subsampling is active (sample_dist > w);
+ * ignored otherwise. Defined in terms of the public single-source-of-truth
+ * constant so the two cannot drift. */
+#define HIFIASM_MZ_REWIN_DEFAULT HIFIASM_OVLP_REWIN
 
 static int sketch_into_ctx(hifiasm_sketch_ctx_t *ctx,
                            const char *seq, int len, int w, int k, int is_hpc,
