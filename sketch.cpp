@@ -575,13 +575,14 @@ void sf##_ha_sketch(const char *str, int len, int w, int k, uint32_t rid, int is
 	/**debug_pl(str, len, w, k, is_hpc, p, hf, mt);**/\
     if (sample_dist > w) sf##_select_mz_h(p, mt, len, sample_dist, ws, k, tl);\
     if (dp_min_len > 0 && pt && mt) sf##_refine_sketch(p, pt, len, dp_min_len, dp_e, min_freq, mt, km);\
-    /**Het-mer seeding: independently scan the RAW sequence with a k-bit rolling\
-       k-mer (het-mer k, not the HPC 51-mer k) and force-emit a minimizer at\
-       every recognised het-mer. Mirrors myloasm get_twin_read_syncmer, which\
-       collects SNPmer positions in the same read scan as minimizers. Emitted\
-       here (after refine, before the rid-populate loop) so het-mers bypass\
-       occurrence refinement yet still receive the correct rid below.**/\
-    if (g_hetmer_set != NULL) {\
+    /**Het-mer seeding DISABLED: the second-pass overlap refinement now derives\
+       its anchors from myloasm SNPmers (open syncmers + SNPmers) via the\
+       fakechain path, so we no longer force-emit het-mer minimizers into the\
+       first-pass sketch. The block below is disabled with a statically-false\
+       guard (this is inside a macro, so #if 0 / block comments cannot be used);\
+       the compiler dead-code-eliminates it. Kept for easy re-enabling in\
+       experiments. See hetmer.{h,cpp} and fakechain.{h,cpp}.**/\
+    if (0 /*DISABLED*/ && g_hetmer_set != NULL) {\
         int hk = hetmer_k(g_hetmer_set);\
         if (len >= hk) {\
             uint64_t hmask = (hk >= 32) ? ~0ULL : ((1ULL<<(2*hk)) - 1);\
