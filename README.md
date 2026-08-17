@@ -26,10 +26,27 @@ candidates are not dropped).
 
 ## Building
 
+### Prerequisites
+
+- A C++11 compiler (`g++` or `clang++`) and zlib development headers.
+- A **Rust toolchain** (`cargo`, stable). The bundled SNPmer engine
+  ([`external/myloasm`](external/myloasm), a git submodule) is a Rust staticlib
+  that the build compiles with `cargo build --release`. Install via
+  [rustup](https://rustup.rs) if you do not already have it.
+- The **myloasm submodule must be checked out** before building. Clone with
+  submodules, or initialise them in an existing checkout:
+
+  ```sh
+  # fresh clone
+  git clone --recurse-submodules https://github.com/kokyriakidis/hifiasmCandidates
+  # or, in an existing checkout
+  git submodule update --init --recursive
+  ```
+
 ### Make (executable)
 
 ```sh
-make            # builds ./hifiasm
+make            # builds ./hifiasm (compiles external/myloasm via cargo first)
 make lib        # builds libhifiasm_overlaps.a (static library, PIC)
 ```
 
@@ -86,15 +103,22 @@ add_subdirectory(external/hifiasmCandidates)
 
 ### Linking the static library by hand
 
-If you build with `make lib` and link manually, you **must** pass
-`-Wl,--gc-sections`. The overlap code path references (but never calls) symbols
-from the removed error-correction/assembly code; `--gc-sections` lets the linker
-drop those unused sections so the final link succeeds:
+If you build with `make lib` and link manually, you **must**:
+
+- pass `-Wl,--gc-sections` — the overlap code path references (but never calls)
+  symbols from the removed error-correction/assembly code, and `--gc-sections`
+  lets the linker drop those unused sections; and
+- also link the **myloasm staticlib and its native dependencies** —
+  `libhifiasm_overlaps.a` includes the het-mer / fake-chain code, which calls
+  the myloasm FFI (`external/myloasm/target/release/libmyloasm.a`, plus
+  `-lgcc_s -lutil -lrt -ldl` as reported by
+  `cargo rustc --print native-static-libs`):
 
 ```sh
 g++ -Wl,--gc-sections your_app.o \
     external/hifiasmCandidates/libhifiasm_overlaps.a \
-    -lz -lpthread -lm -o your_app
+    external/hifiasmCandidates/external/myloasm/target/release/libmyloasm.a \
+    -lz -lpthread -lm -lgcc_s -lutil -lrt -ldl -o your_app
 ```
 
 ### C API
