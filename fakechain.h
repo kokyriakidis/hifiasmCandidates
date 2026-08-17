@@ -12,10 +12,14 @@
  *      at k=21, each carrying the read's CANONICAL k-mer key at that position.
  *   4. THIS module refines each candidate by MATCHING those markers between the
  *      pair and CHAINING them with myloasm's own DP (myloasm_chain, exposed via
- *      the FFI). The interval is used ONLY to select the pair / bias matching;
- *      the chain itself runs over the full reads and is robust to interval
- *      coordinate noise. The output is the ORDERED chained anchor list, tagged
- *      by marker type, handed to dinara for downstream scoring/phasing.
+ *      the FFI). Markers are CLIPPED to the hifiasm-derived interval on BOTH
+ *      reads before matching (query pos in [q_s,q_e), target pos in [t_s,t_e)),
+ *      so the chain runs only over the in-interval anchor set, not the full
+ *      reads. This is safe because hifiasm candidate coordinates and myloasm
+ *      marker positions are both RAW read coordinates (same space), and the
+ *      interval already brackets the colinear region hifiasm found. The output
+ *      is the ORDERED chained anchor list, tagged by marker type, handed to
+ *      dinara for downstream scoring/phasing.
  *
  * Why myloasm markers and not hifiasm's here: myloasm uses OPEN SYNCMERS, which
  * (unlike minimizers) are context-independent and give unbiased sequence-
