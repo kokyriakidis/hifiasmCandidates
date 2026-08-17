@@ -85,7 +85,20 @@ add_custom_target(myloasm_engine DEPENDS "${MYLOASM_LIB}")
 
 # Native libs cargo links against for a staticlib (cargo rustc
 # --print native-static-libs); required at final link of any consumer.
-set(MYLOASM_SYS_LIBS gcc_s util rt dl)
+# cargo reports the unwinder as -lgcc_s, but that name resolves only to the
+# SHARED libgcc_s.so; a consumer linking with -static (e.g. dinara) cannot use
+# it and fails with "cannot find -lgcc_s". libgcc_eh.a exposes the same
+# _Unwind_* symbols as a static archive and links in both static and dynamic
+# final executables, so resolve its absolute path and use that instead.
+execute_process(
+    COMMAND ${CMAKE_C_COMPILER} -print-file-name=libgcc_eh.a
+    OUTPUT_VARIABLE MYLOASM_GCC_EH
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+if(NOT MYLOASM_GCC_EH OR NOT EXISTS "${MYLOASM_GCC_EH}")
+    # Fall back to the shared unwinder if the static archive is unavailable.
+    set(MYLOASM_GCC_EH gcc_s)
+endif()
+set(MYLOASM_SYS_LIBS "${MYLOASM_GCC_EH}" util rt dl)
 
 add_library(hifiasm_overlaps STATIC ${HIFIASM_OVERLAPS_SOURCES})
 add_dependencies(hifiasm_overlaps myloasm_engine)
