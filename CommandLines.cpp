@@ -8,6 +8,7 @@
 #include "CommandLines.h"
 #include "ketopt.h"
 #include "kseq.h"
+#include "hetmer.h"
 
 KSEQ_INIT(gzFile, gzread)
 
@@ -81,6 +82,9 @@ static ko_longopt_t long_options[] = {
     { "ul-m",     ko_required_argument, 363},
     { "rl-cut",     ko_required_argument, 364},
     { "sc-cut",     ko_required_argument, 365},
+    { "hetmers",    ko_required_argument, 366},
+    { "hetmer-k",   ko_required_argument, 367},
+    { "myloasm",    ko_no_argument,       368},
     // { "path-round",     ko_required_argument, 348},
 	{ 0, 0, 0 }
 };
@@ -129,6 +133,11 @@ void Print_H(hifiasm_opt_t* asm_opt)
     fprintf(stderr, "                 homozygous read coverage [auto]\n");
     fprintf(stderr, "    --dbg-ovec   emit the raw pre-alignment candidate set (<prefix>.candidates.paf)\n");
     fprintf(stderr, "                 instead of alignment-filtered overlaps\n");
+    fprintf(stderr, "    --hetmers    FILE\n");
+    fprintf(stderr, "                 het-mer listing (Phasemer -Ls); force these as extra seeds\n");
+    fprintf(stderr, "    --hetmer-k   INT  k-mer length of --hetmers entries (odd, <=31) [%d]\n", asm_opt->hetmer_k);
+    fprintf(stderr, "    --myloasm    detect het-mers (SNPmers) in-process from the input reads\n");
+    fprintf(stderr, "                 via the bundled myloasm engine (ignores --hetmers)\n");
     fprintf(stderr, "  ONT read filtering (with --ont):\n");
     fprintf(stderr, "    --rl-cut     INT\n");
     fprintf(stderr, "                 filter out ONT simplex reads shorter than <INT> [%ld]\n", asm_opt->rl_cut);
@@ -272,6 +281,10 @@ void init_opt(hifiasm_opt_t* asm_opt)
 
     asm_opt->rl_cut = 1000;
     asm_opt->sc_cut = 10;
+
+    asm_opt->hetmer_file = NULL;
+    asm_opt->hetmer_k = 21;
+    asm_opt->hetmer_from_myloasm = 0;
 }   
 
 void destory_enzyme(enzyme* f)
@@ -902,6 +915,12 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
             asm_opt->rl_cut = atol(opt.arg);
         } else if (c == 365) {
             asm_opt->sc_cut = atol(opt.arg);
+        } else if (c == 366) {
+            asm_opt->hetmer_file = opt.arg;
+        } else if (c == 367) {
+            asm_opt->hetmer_k = atoi(opt.arg);
+        } else if (c == 368) {
+            asm_opt->hetmer_from_myloasm = 1;
         } else if (c == 'l') {   ///0: disable purge_dup; 1: purge containment; 2: purge overlap
             asm_opt->purge_level_primary = asm_opt->purge_level_trio = atoi(opt.arg);
         }
@@ -941,6 +960,37 @@ int CommandLine_process(int argc, char *argv[], hifiasm_opt_t* asm_opt)
     // exit(1);
     if(!(asm_opt->is_ont)) {
         asm_opt->rl_cut = -1; asm_opt->sc_cut = 1;
+    }
+
+    if (asm_opt->hetmer_from_myloasm) {
+        /* In-process SNPmer detection over the same input read files. Runs
+         * after get_queries() has populated read_file_names. Takes precedence
+         * over --hetmers. myloasm chooses k (default 21); --hetmer-k is only
+         * a hint passed through (0 => use myloasm's default). */
+        if (asm_opt->num_reads <= 0 || asm_opt->read_file_names == NULL) {
+            fprintf(stderr, "[ERROR] --myloasm requires input read files\n");
+            return 0;
+        }
+        g_hetmer_set = hetmer_load_from_myloasm(
+            (const char *const *)asm_opt->read_file_names,
+            (size_t)asm_opt->num_reads, asm_opt->hetmer_k, asm_opt->thread_num);
+        if (!g_hetmer_set) {
+            fprintf(stderr, "[ERROR] in-process myloasm SNPmer detection failed\n");
+            return 0;
+        }
+        fprintf(stderr, "[M::%s] het-mer seeding enabled (myloasm): %llu %d-mers\n",
+                __func__, (unsigned long long)hetmer_size(g_hetmer_set),
+                hetmer_k(g_hetmer_set));
+    } else if (asm_opt->hetmer_file) {
+        g_hetmer_set = hetmer_load(asm_opt->hetmer_file, asm_opt->hetmer_k);
+        if (!g_hetmer_set) {
+            fprintf(stderr, "[ERROR] failed to load het-mers from %s\n",
+                    asm_opt->hetmer_file);
+            return 0;
+        }
+        fprintf(stderr, "[M::%s] het-mer seeding enabled: %llu %d-mers\n",
+                __func__, (unsigned long long)hetmer_size(g_hetmer_set),
+                hetmer_k(g_hetmer_set));
     }
 
     return check_option(asm_opt);

@@ -1,0 +1,3 @@
+[submodule "external/myloasm"]
+	path = external/myloasm
+	url = https://github.com/kokyriakidis/myloasmSNPmers.git

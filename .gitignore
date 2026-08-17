@@ -11,6 +11,8 @@ test_sketch_filter
 bench_sketch_filter
 test_store_overlaps
 test_cli_parity
+test_fakechain
+test_fakechain_bridge
 # Core dumps.
 core
 core.*

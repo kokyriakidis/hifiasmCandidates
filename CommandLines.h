@@ -170,6 +170,10 @@ typedef struct {
     int64_t rl_cut;
     int64_t sc_cut;
 
+    char *hetmer_file;      /* Phasemer -Ls listing of het-mers, or NULL */
+    int hetmer_k;           /* k-mer length of het-mers (odd, <= 31) */
+    int hetmer_from_myloasm; /* if set, detect het-mers in-process via myloasm */
+
 } hifiasm_opt_t;
 
 extern hifiasm_opt_t asm_opt;

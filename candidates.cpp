@@ -28,6 +28,7 @@
 #include "Overlaps.h"
 #include "htab.h"
 #include "kthread.h"
+#include "hetmer.h"
 #include "ksort.h"
 #include "hifiasm_overlaps_internal.h"
 
@@ -305,6 +306,9 @@ static int ha_detect_candidates_impl(int from_store)
 
     fprintf(stderr, "[M::%s] indexed %lu reads; hom_cov=%d het_cov=%d\n",
             __func__, (unsigned long)R_INF.total_reads, hom_cov, het_cov);
+    if (g_hetmer_set != NULL)
+        fprintf(stderr, "[M::%s] het-mer seeds force-emitted during indexing: %llu\n",
+                __func__, (unsigned long long)g_hetmer_emitted);
 
     // 3) detect overlaps.
     // Default: candidate detection + base-level alignment/filter, matching the
