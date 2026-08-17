@@ -165,6 +165,65 @@ int  myloasm_chain(const MyloAnchor *anchors, size_t n_anchors,
                    MyloChainAnchor *out, size_t out_cap,
                    size_t *out_n, int *out_score, int *out_is_reverse);
 
+/* ---------------------------------------------------------------------------
+ * Native all-vs-all overlap detection (myloasm's own overlapper).
+ * ---------------------------------------------------------------------------
+ *
+ * myloasm_detect_overlaps() runs myloasm's native overlap pipeline end to end:
+ * index every read's syncmers, find candidate pairs by shared minimizers, chain
+ * with the DP, refine with SNPmers, and emit dovetail + containment overlaps.
+ * Unlike the fakechain path this does NOT use hifiasm for candidate pairs.
+ *
+ * Coordinates are forward-strand, half-open [start,end) on each read's own
+ * sequence. `reverse` = read_j is reverse-complemented relative to read_i.
+ * read_i / read_j index into the names/name_offsets table (name_offsets has
+ * n_reads+1 entries; read r's base id is names[name_offsets[r] ..
+ * name_offsets[r+1]], NOT NUL-terminated).
+ *
+ * Structs MUST match the #[repr(C)] definitions in ffi.rs field-for-field.
+ */
+
+typedef struct {
+    uint32_t read_i;
+    uint32_t read_j;
+    uint32_t start1;             /* aligned interval on read_i (forward)  */
+    uint32_t end1;
+    uint32_t start2;             /* aligned interval on read_j (forward)  */
+    uint32_t end2;
+    uint32_t shared_minimizers;
+    uint32_t shared_snpmers;
+    uint32_t diff_snpmers;
+    uint8_t  reverse;            /* 1 = read_j reverse-complemented       */
+    uint8_t  contained;          /* 1 = containment, 0 = dovetail         */
+    uint8_t  _pad[2];
+} MyloOverlap;
+
+/* Opaque-owning result. `overlaps`/`n_overlaps` and the name table
+ * (`names`/`name_offsets`/`n_reads`) are meant to be read by the host; the
+ * remaining fields are private allocation bookkeeping for
+ * myloasm_overlaps_free(). Layout must match ffi.rs exactly. */
+typedef struct {
+    MyloOverlap *overlaps;
+    size_t       n_overlaps;
+    size_t       _overlaps_cap;
+
+    char        *names;          /* concatenated base ids, NOT NUL-separated */
+    size_t      *name_offsets;   /* n_reads+1 byte offsets into names         */
+    size_t       n_reads;
+    size_t       _names_cap;
+    size_t       _name_offsets_cap;
+} MyloOverlaps;
+
+/* Detect all-vs-all overlaps. kmer_size/c/threads: pass 0 for defaults
+ * (21 / 11 / auto). Returns 0 on success (out populated), non-zero on error
+ * (out zeroed). Free with myloasm_overlaps_free(). */
+int  myloasm_detect_overlaps(const char *const *paths, size_t n_paths,
+                             int kmer_size, int c, int threads,
+                             MyloOverlaps *out);
+
+/* Free overlaps from myloasm_detect_overlaps. Safe on a zeroed struct. */
+void myloasm_overlaps_free(MyloOverlaps *ov);
+
 #ifdef __cplusplus
 }
 #endif

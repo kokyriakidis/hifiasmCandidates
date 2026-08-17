@@ -74,11 +74,17 @@ if(NOT EXISTS "${MYLOASM_DIR}/Cargo.toml")
 endif()
 set(MYLOASM_LIB "${MYLOASM_DIR}/target/release/libmyloasm.a")
 
+# Track the Rust sources so cargo reruns when the engine changes (otherwise the
+# custom command only fires when libmyloasm.a is missing, and edits to *.rs /
+# Cargo.toml are silently ignored, leaving a stale staticlib).
+file(GLOB_RECURSE MYLOASM_RUST_SOURCES CONFIGURE_DEPENDS
+    "${MYLOASM_DIR}/src/*.rs")
 add_custom_command(
     OUTPUT "${MYLOASM_LIB}"
     COMMAND ${CARGO_EXECUTABLE} build --release
             --manifest-path "${MYLOASM_DIR}/Cargo.toml"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    DEPENDS ${MYLOASM_RUST_SOURCES} "${MYLOASM_DIR}/Cargo.toml"
     COMMENT "Building bundled myloasm SNPmer engine (cargo build --release)"
     VERBATIM)
 add_custom_target(myloasm_engine DEPENDS "${MYLOASM_LIB}")
