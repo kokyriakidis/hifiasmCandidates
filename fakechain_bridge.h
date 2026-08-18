@@ -42,6 +42,9 @@ typedef struct {
     fakechain_opt_t    fakechain; /* fake-chain / chaining options             */
     int                myloasm_k; /* SNPmer/syncmer k (0 -> 21)                */
     int                myloasm_c; /* syncmer compression (0 -> 11)             */
+    int                min_overlap_len; /* drop a chained overlap unless BOTH its
+                                     query and target spans are >= this many
+                                     RAW read bases. 0 -> keep all.           */
 } fakechain_bridge_opt_t;
 
 /* Fill defaults: HiFi candidates, raw_candidates=1, fakechain defaults,

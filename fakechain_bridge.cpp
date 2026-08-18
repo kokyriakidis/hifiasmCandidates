@@ -26,6 +26,7 @@ void fakechain_bridge_opt_init(fakechain_bridge_opt_t *opt) {
     fakechain_opt_init(&opt->fakechain);
     opt->myloasm_k = 21;
     opt->myloasm_c = 11;
+    opt->min_overlap_len = 0;   /* keep all by default */
 }
 
 int fakechain_bridge_overlaps(const char *const *read_files,
@@ -56,6 +57,7 @@ int fakechain_bridge_overlaps(const char *const *read_files,
         o.fakechain = opt->fakechain;
         if (opt->myloasm_k) o.myloasm_k = opt->myloasm_k;
         if (opt->myloasm_c) o.myloasm_c = opt->myloasm_c;
+        o.min_overlap_len = opt->min_overlap_len;
     }
 
     /* --- Step 1: raw candidate overlaps + intervals + name table. --- */
@@ -128,6 +130,21 @@ int fakechain_bridge_overlaps(const char *const *read_files,
         if (frc != 0 || !fr.ok || fr.n_anchor == 0) {
             fakechain_result_free(&fr);
             continue;
+        }
+
+        /* Minimum overlap length. fr.q_start/q_end and fr.t_start/t_end are RAW
+         * read coordinates (see fakechain.h), so this is a base-count gate: keep
+         * the overlap only when BOTH the query and target chain spans reach
+         * min_overlap_len. Applied here, before the overlap is materialized, so
+         * short candidates never reach dinara. */
+        if (o.min_overlap_len > 0) {
+            const uint32_t q_span = (fr.q_end > fr.q_start) ? (fr.q_end - fr.q_start) : 0;
+            const uint32_t t_span = (fr.t_end > fr.t_start) ? (fr.t_end - fr.t_start) : 0;
+            if (q_span < (uint32_t)o.min_overlap_len ||
+                t_span < (uint32_t)o.min_overlap_len) {
+                fakechain_result_free(&fr);
+                continue;
+            }
         }
 
         fakechain_overlap_t out;
