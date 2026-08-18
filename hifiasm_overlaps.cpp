@@ -827,6 +827,30 @@ hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
  * then ha_ft_gen(read_from_store=1) reads the sequences back from the store and
  * builds the table. R_INF is left intact for the caller to release.
  */
+/* hifiasm hard-codes bf_shift=37 (a ~16GB bloom filter) in init_opt() because
+ * it always processes full human genomes, where the bloom keeps singleton
+ * k-mers out of the exact count hash to save memory. For dinara's in-memory
+ * read subset that allocation is pure overhead: zeroing 16GB is serial and
+ * dominates the filter build (observed ~29s at <1 core for ~1000 reads). The
+ * bloom only affects memory, never the high-occurrence filter result, so we
+ * size it to the actual input. Returns a bf_shift such that the bloom has a
+ * few bits per distinct k-mer (~total_bases upper bound), clamped to
+ * [pre+1, 37]; returns 0 (bloom disabled -> exact counting) for tiny inputs.
+ *
+ * YAK_COUNTER_BITS (== ha_ct pre) is 12; the bloom is allocated only when
+ * bf_shift > pre, so anything <= 12 disables it. */
+static int adaptive_bf_shift(uint64_t total_bases)
+{
+    if (total_bases == 0) return 0;
+    /* Target ~4 bits per base (>=1 bit per distinct k-mer with headroom for
+     * the 4-hash bloom). Find the smallest power-of-two bit count >= that. */
+    uint64_t target_bits = total_bases * 4;
+    int shift = 13; /* smallest usable value (> pre=12) */
+    while (shift < 37 && ((uint64_t)1 << shift) < target_bits) ++shift;
+    if (shift <= 12) return 0; /* disable bloom for tiny inputs */
+    return shift;
+}
+
 hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *opt)
 {
     if (!g_store_loaded) {
@@ -851,6 +875,11 @@ hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *op
     if (is_hpc) asm_opt.flag &= ~HA_F_NO_HPC;
     else        asm_opt.flag |=  HA_F_NO_HPC;
     asm_opt.rl_cut = rl_cut;
+
+    /* Size the counting bloom filter to the loaded read set instead of the
+     * genome-scale default (see adaptive_bf_shift). R_INF is already loaded
+     * here, so total_reads_bases is exact. */
+    asm_opt.bf_shift = adaptive_bf_shift(R_INF.total_reads_bases);
 
     int hom_cov = -1;
     /* read_from_store=1: read sequences back from the pre-loaded R_INF and
