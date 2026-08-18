@@ -119,7 +119,7 @@ static void run_and_check(const char* fasta, const char* cli_paf,
     rc=hifiasm_reads_store_load(hr.data(),hr.size());
     CHECK(rc==0,"store load rc==0");
     hifiasm_overlap_t* sov=0; uint64_t sn=0; char* snm=0; uint64_t* soff=0; uint64_t snr=0;
-    rc=hifiasm_detect_overlaps_from_store(&opt,&sov,&sn,&snm,&soff,&snr,NULL,NULL);
+    rc=hifiasm_detect_overlaps_from_store(&opt,&sov,&sn,&snm,&soff,&snr,NULL,NULL,NULL,NULL);
     CHECK(rc==0,"store rc==0");
     std::set<Key> sset=to_keys(sov,sn,snm,soff);
     std::fprintf(stderr,"[%s] store overlaps=%zu\n", tag, sset.size());

@@ -35,14 +35,18 @@ int hifiasm_ovlp_sink_active(void);
  * mirror hifiasm_overlap_t (see hifiasm_overlaps.h). */
 /* cigar/cigar_len: hifiasm packed uint16_t CIGAR tokens for this overlap (may be
  * NULL/0 for the raw candidate path). cigar_t_start: the target anchor in the
- * alignment frame the tokens run in (see hifiasm_overlap_t::cigar_t_start). */
+ * alignment frame the tokens run in (see hifiasm_overlap_t::cigar_t_start).
+ * chain/chain_len: hifiasm's dense native chain anchors for this overlap, each
+ * packed (q_start<<32)|t_start (see hifiasm_overlap_t::chain_offset). May be
+ * NULL/0 when no chain was captured. */
 void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
                             uint32_t q_start, uint32_t q_end,
                             uint32_t t_start, uint32_t t_end,
                             uint32_t n_match, uint32_t block_len,
                             uint8_t is_same_strand,
                             const uint16_t *cigar, uint32_t cigar_len,
-                            uint32_t cigar_t_start);
+                            uint32_t cigar_t_start,
+                            const uint64_t *chain, uint32_t chain_len);
 
 /* Snapshot the read-name table into the sink. Called once by
  * ha_detect_candidates() just before it tears down R_INF, so the names outlive

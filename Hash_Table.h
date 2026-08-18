@@ -75,6 +75,25 @@ typedef struct
 	uint32_t size;
 } Fake_Cigar;
 
+// Dense native chain anchors for one overlap. Each entry packs, in a single
+// uint64_t, one kept seed's START positions:
+//     (q_start << 32) | t_start
+// where q_start is the minimizer START on the FORWARD query read and t_start is
+// the minimizer START on the target in ALIGNMENT orientation (same frames
+// hifiasm's k_mer_hit uses: START = off + 1 - (cnt & 0xff)). Entries are in
+// chain order (strictly increasing q and t). Same growable-buffer discipline as
+// Fake_Cigar; see chain_anchors_* helpers in Hash_Table.cpp.
+typedef struct
+{
+    uint64_t* buffer;
+    uint32_t length;
+    uint32_t size;
+} Chain_Anchors;
+
+#define CHAIN_ANCHOR_Q(v) ((uint32_t)((v) >> 32))
+#define CHAIN_ANCHOR_T(v) ((uint32_t)((v) & 0xffffffffu))
+#define CHAIN_ANCHOR_PACK(q, t) ((((uint64_t)(q)) << 32) | (uint64_t)(uint32_t)(t))
+
 typedef struct
 {
     uint32_t x_id;
@@ -100,6 +119,16 @@ typedef struct
     // uint32_t w_list_size;
     // uint32_t w_list_length;
     Fake_Cigar f_cigar;
+
+    // Dense native chain: every seed hit the colinear DP kept for THIS overlap,
+    // in creation order (strictly increasing query/target). Captured at chain
+    // creation (lchain_qdp_mcopy_fast) alongside f_cigar because align_length is
+    // zeroed afterwards and the shared Candidates_list is reused per read.
+    // Each entry packs one anchor's forward-query START and alignment-target
+    // START (see Chain_Anchors below). Consumed by the in-memory overlap sink to
+    // export hifiasm's native chain (replaces re-deriving it downstream). Lives
+    // for the whole overlap (not per-window), mirroring f_cigar's lifecycle.
+    Chain_Anchors chain;
 
     window_list_alloc w_list;
     window_list_alloc boundary_cigars;
@@ -156,6 +185,10 @@ uint64_t readID, uint64_t readLength, All_reads* R_INF, const ul_idx_t *uref, do
 
 void init_fake_cigar(Fake_Cigar* x);
 void destory_fake_cigar(Fake_Cigar* x);
+void init_chain_anchors(Chain_Anchors* x);
+void destory_chain_anchors(Chain_Anchors* x);
+void clear_chain_anchors(Chain_Anchors* x);
+void gen_chain_anchors(Chain_Anchors* z, k_mer_hit* hit, int64_t n_hit);
 void clear_fake_cigar(Fake_Cigar* x);
 void add_fake_cigar(Fake_Cigar* x, uint32_t gap_site, int32_t gap_shift, void *km);
 void resize_fake_cigar(Fake_Cigar* x, uint64_t size, void *km);

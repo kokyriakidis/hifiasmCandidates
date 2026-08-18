@@ -33,6 +33,7 @@ void init_overlap_region_alloc(overlap_region_alloc* list)
     uint64_t i;
     for (i = 0; i < list->size; i++) { 
         init_fake_cigar(&(list->list[i].f_cigar));
+        init_chain_anchors(&(list->list[i].chain));
         init_window_list_alloc(&(list->list[i].w_list));
         init_window_list_alloc(&(list->list[i].boundary_cigars));
     }
@@ -45,6 +46,7 @@ void clear_overlap_region_alloc(overlap_region_alloc* list)
     uint64_t i = 0;
     for (i = 0; i < list->size; i++) {   
         clear_fake_cigar(&(list->list[i].f_cigar));
+        clear_chain_anchors(&(list->list[i].chain));
         clear_window_list_alloc(&(list->list[i].w_list));
         clear_window_list_alloc(&(list->list[i].boundary_cigars));
     }
@@ -55,6 +57,7 @@ void destory_overlap_region_alloc(overlap_region_alloc* list)
     uint64_t i = 0;
     for (i = 0; i < list->size; i++) {
         destory_fake_cigar(&(list->list[i].f_cigar));
+        destory_chain_anchors(&(list->list[i].chain));
         destory_window_list_alloc(&(list->list[i].w_list));
         destory_window_list_alloc(&(list->list[i].boundary_cigars));
     }
@@ -1272,6 +1275,44 @@ void destory_Candidates_list_buf(void *km, Candidates_list* l, int is_z)
     if(is_z) memset(l, 0, sizeof(*l));
 }
 
+void init_chain_anchors(Chain_Anchors* x)
+{
+    x->buffer = NULL;
+    x->length = 0;
+    x->size = 0;
+}
+
+void destory_chain_anchors(Chain_Anchors* x)
+{
+    if(x->size > 0) free(x->buffer);
+}
+
+void clear_chain_anchors(Chain_Anchors* x)
+{
+    x->length = 0;
+}
+
+// Fill the dense chain for overlap o from its kept seed hits (hit[0..n_hit),
+// already in chain order). Stores forward-query START and alignment-target
+// START per anchor (START = self_offset/offset + 1 - span, span = cnt & 0xff),
+// matching the coordinate frames dinara consumes. Mirrors gen_fake_cigar().
+void gen_chain_anchors(Chain_Anchors* z, k_mer_hit* hit, int64_t n_hit)
+{
+    int64_t k; z->length = 0;
+    if(n_hit <= 0) return;
+    if((uint32_t)n_hit > z->size) {
+        z->size = (uint32_t)n_hit;
+        kroundup32(z->size);
+        REALLOC(z->buffer, z->size);
+    }
+    for (k = 0; k < n_hit; k++) {
+        uint32_t span = hit[k].cnt & (0xffu);
+        uint32_t q_start = hit[k].self_offset + 1 - span;
+        uint32_t t_start = hit[k].offset + 1 - span;
+        z->buffer[z->length++] = CHAIN_ANCHOR_PACK(q_start, t_start);
+    }
+}
+
 void init_fake_cigar(Fake_Cigar* x)
 {
     x->buffer = NULL;
@@ -1965,6 +2006,8 @@ uint64_t lchain_qdp_mcopy(Candidates_list *cl, int64_t a_idx, int64_t a_n, int64
                         }
                         z->x_id = xid; 
                         if(gen_cigar) gen_fake_cigar(&(z->f_cigar), z, apend_be, swap+i-ni, ni);
+                        gen_chain_anchors(&(z->chain), swap+i-ni, ni);
+
                         if(!khit_n) z->align_length = 0; 
                     }
                     memcpy(des, swap, i*sizeof((*swap))); //assert(i == ch_n);
@@ -1983,6 +2026,8 @@ uint64_t lchain_qdp_mcopy(Candidates_list *cl, int64_t a_idx, int64_t a_n, int64
                     }
                     z->x_id = xid; 
                     if(gen_cigar) gen_fake_cigar(&(z->f_cigar), z, apend_be, des+i-ni, ni);
+                    gen_chain_anchors(&(z->chain), des+i-ni, ni);
+
                     if(!khit_n) z->align_length = 0; 
                 }
                 return i;
@@ -2000,6 +2045,8 @@ uint64_t lchain_qdp_mcopy(Candidates_list *cl, int64_t a_idx, int64_t a_n, int64
     for (i = 0; i < cL; i++) {des[i] = a[t[cL-i-1]]; des[i].readID = res->length-1;}
     z->non_homopolymer_errors = des_idx;
     if(gen_cigar) gen_fake_cigar(&(z->f_cigar), z, apend_be, des, cL);
+    gen_chain_anchors(&(z->chain), des, cL);
+
     if(khit_n) z->align_length = cL;
     return cL;
 }
@@ -2241,6 +2288,8 @@ uint64_t lchain_qdp_mcopy_fast(Candidates_list *cl, int64_t a_idx, int64_t a_n, 
                         }
                         z->x_id = xid; 
                         if(gen_cigar) gen_fake_cigar(&(z->f_cigar), z, apend_be, swap+i-ni, ni);
+                        gen_chain_anchors(&(z->chain), swap+i-ni, ni);
+
                         if(!khit_n) z->align_length = 0; 
                     }
                     memcpy(des, swap, i*sizeof((*swap))); //assert(i == ch_n);
@@ -2259,6 +2308,8 @@ uint64_t lchain_qdp_mcopy_fast(Candidates_list *cl, int64_t a_idx, int64_t a_n, 
                     }
                     z->x_id = xid; 
                     if(gen_cigar) gen_fake_cigar(&(z->f_cigar), z, apend_be, des+i-ni, ni);
+                    gen_chain_anchors(&(z->chain), des+i-ni, ni);
+
                     if(!khit_n) z->align_length = 0; 
                 }
                 return i;
@@ -2279,6 +2330,8 @@ uint64_t lchain_qdp_mcopy_fast(Candidates_list *cl, int64_t a_idx, int64_t a_n, 
     for (i = 0; i < cL; i++) {des[i] = a[t[cL-i-1]]; des[i].readID = res->length-1;}
     z->non_homopolymer_errors = des_idx;
     if(gen_cigar) gen_fake_cigar(&(z->f_cigar), z, apend_be, des, cL);
+    gen_chain_anchors(&(z->chain), des, cL);
+
     if(khit_n) z->align_length = cL;
     return cL;
 }

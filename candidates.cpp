@@ -170,7 +170,11 @@ static void emit_candidates(overlap_region_alloc *ol)
                 o->shared_seed > 0 ? (uint32_t)o->shared_seed : 0,
                 span,
                 (uint8_t)(o->y_pos_strand == 0),
-                NULL, 0, 0);
+                NULL, 0, 0,
+                // Native dense chain captured during chaining. It is stored in
+                // the alignment frame (target coords match y_pos_s..y_pos_e);
+                // on the raw path there is no rev-adjust so it maps directly.
+                o->chain.buffer, o->chain.length);
         }
         return;
     }
@@ -221,6 +225,23 @@ static void worker_candidates(void *data, long i, int tid)
 // ---------------------------------------------------------------------------
 extern void *ha_flt_tab;
 extern ha_pt_t *ha_idx;
+
+// Optional caller-provided high-occurrence k-mer filter to REUSE for seeding.
+// Set by the bridge (hifiasm_overlaps.cpp) from hifiasm_ovlp_opt_t::filter just
+// before ha_detect_candidates_from_store(); NULL means "build the filter here"
+// (original behavior). When non-NULL, ha_detect_candidates_impl() skips its own
+// ha_ft_gen() pass (one fewer yak count pass) and does NOT free the table (the
+// caller owns it). It MUST have been built at the same k/w/HPC the overlapper
+// sketches with. Process-global to match the single-call-at-a-time bridge
+// contract; the bridge clears it after each call.
+void *g_reuse_flt_tab = NULL;
+
+// Peak homozygous coverage that accompanies g_reuse_flt_tab (the value ha_ft_gen
+// computed when the reused filter was built). Only meaningful when
+// g_reuse_flt_tab != NULL. Lets ha_detect_candidates_impl() size seed occurrence
+// gates / max_n_chain without recomputing the coverage histogram. <=0 means
+// "unknown": fall back to ha_pt_gen's own peak_hom.
+int g_reuse_hom_cov = -1;
 
 // Post-chaining alignment + filter path (defined in ecovlp.cpp). Runs the same
 // candidate detector as above and then base-level alignment; candidates that
@@ -286,7 +307,26 @@ static int ha_detect_candidates_impl(int from_store)
     //                 read lengths into R_INF (HAF_RS_WRITE_LEN).
     //   store path  : ha_ft_gen(read_from_store=1) reads sequences back from the
     //                 pre-loaded R_INF (HAF_RS_READ); it writes nothing into it.
-    if (!(asm_opt.flag & HA_F_NO_KMER_FLT)) {
+    //
+    // Filter REUSE: when the bridge supplied a prebuilt filter (g_reuse_flt_tab,
+    // e.g. dinara's no-HPC marker filter built at the same k/w), skip the
+    // ha_ft_gen() pass entirely -- one fewer yak count pass. The table is
+    // borrowed: it is NOT freed at cleanup (owner: the caller). We still need a
+    // coverage estimate for ha_opt_update_cov(); use the value captured when the
+    // reused filter was built (g_reuse_hom_cov). If that is unknown (<=0), leave
+    // coverage to ha_pt_gen below (its peak_hom path), matching the
+    // ha_flt_tab==NULL branch.
+    int reused_flt = 0;
+    if (g_reuse_flt_tab != NULL) {
+        ha_flt_tab = g_reuse_flt_tab;
+        reused_flt = 1;
+        if (g_reuse_hom_cov > 0) {
+            hom_cov = g_reuse_hom_cov;
+            ha_opt_update_cov(&asm_opt, hom_cov);
+        }
+        fprintf(stderr, "[M::%s] reusing caller-provided k-mer filter "
+                "(hom_cov=%d)\n", __func__, g_reuse_hom_cov);
+    } else if (!(asm_opt.flag & HA_F_NO_KMER_FLT)) {
         ha_flt_tab = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, 0, from_store);
         ha_opt_update_cov(&asm_opt, hom_cov);
     }
@@ -302,7 +342,12 @@ static int ha_detect_candidates_impl(int from_store)
                        &hom_cov, &het_cov);
     asm_opt.hom_cov = hom_cov;
     asm_opt.het_cov = het_cov;
-    if (ha_flt_tab == NULL) ha_opt_update_cov(&asm_opt, hom_cov);
+    // Update max_n_chain from coverage when the filter-build path did NOT already
+    // do so: either no filter at all, or a reused filter that carried no coverage
+    // estimate (g_reuse_hom_cov <= 0). In the reuse-with-coverage case
+    // ha_opt_update_cov already ran above with the captured hom_cov.
+    if (ha_flt_tab == NULL || (reused_flt && g_reuse_hom_cov <= 0))
+        ha_opt_update_cov(&asm_opt, hom_cov);
 
     fprintf(stderr, "[M::%s] indexed %lu reads; hom_cov=%d het_cov=%d\n",
             __func__, (unsigned long)R_INF.total_reads, hom_cov, het_cov);
@@ -335,7 +380,10 @@ static int ha_detect_candidates_impl(int from_store)
     // with hifiasm_reads_store_release() so it can be reused across calls (the
     // same loaded store serves both the filter build and overlap detection).
     ha_pt_destroy(ha_idx); ha_idx = NULL;
-    ha_ft_destroy(ha_flt_tab); ha_flt_tab = NULL;
+    // Only destroy the filter table if WE built it. A reused (borrowed) table is
+    // owned by the caller (the bridge frees it via hifiasm_filter_destroy()).
+    if (!reused_flt) ha_ft_destroy(ha_flt_tab);
+    ha_flt_tab = NULL;
     if (!from_store) destory_All_reads(&R_INF);
 
     return ret;

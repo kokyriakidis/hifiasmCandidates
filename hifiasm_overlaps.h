@@ -27,6 +27,12 @@ extern "C" {
 /* Options controlling overlap detection. Zero-initialize this struct
  * (e.g. `hifiasm_ovlp_opt_t o = {0};`) and then override what you need;
  * fields left at 0 fall back to the values documented below. */
+/* Forward decl: the frequency-filter handle (defined further down) can be
+ * supplied to overlap detection so the overlapper REUSES a filter the caller
+ * already built (e.g. dinara's no-HPC marker filter) instead of rebuilding its
+ * own high-occurrence table. See `filter` below. */
+typedef struct hifiasm_filter_s hifiasm_filter_t;
+
 typedef struct {
     int      threads;        /* number of worker threads (0 -> 1) */
     int      is_ont;         /* 1 = Nanopore/ONT preset, 0 = HiFi (default) */
@@ -35,6 +41,19 @@ typedef struct {
     double   max_ov_diff;    /* max overlap error rate (0 -> preset default) */
     int      raw_candidates; /* 1 = emit pre-alignment candidates (.candidates.paf);
                                 0 = emit alignment-filtered overlaps (.ovlp.paf) */
+    /* Homopolymer compression for seeding. hifiasm's own overlap default is HPC
+     * ON; a caller whose seeds/markers live in RAW (no-HPC) coordinate space
+     * (dinara) sets no_hpc=1 so seed positions match its markers 1:1.
+     *   0 -> HPC on (hifiasm default), 1 -> no-HPC. */
+    int      no_hpc;
+    /* OPTIONAL prebuilt high-occurrence k-mer filter to REUSE for seeding. When
+     * non-NULL the overlapper skips its own ha_ft_gen() filter-build pass (one
+     * fewer yak count pass) and seeds against this table instead. It MUST have
+     * been built with the SAME k / w / HPC mode the overlapper will sketch with
+     * (i.e. k_mer_length / mz_win / no_hpc above), or the frequency counts won't
+     * correspond to the minimizers being filtered. NULL -> build internally as
+     * before. The handle is borrowed (not freed by the overlapper). */
+    const hifiasm_filter_t *filter;
 } hifiasm_ovlp_opt_t;
 
 /*
@@ -113,6 +132,17 @@ typedef struct {
     uint64_t cigar_offset;
     uint32_t cigar_len;
     uint32_t cigar_t_start;
+    /* Native dense chain anchors for this overlap, referenced into the chain
+     * arena returned by hifiasm_detect_overlaps_from_store() (out_chain). Each
+     * of the chain_len entries packs one kept seed's START positions:
+     *     (q_start << 32) | t_start
+     * q_start = minimizer START on the FORWARD query read; t_start = minimizer
+     * START on the target in ALIGNMENT orientation. Entries are in chain order
+     * (strictly increasing q and t). chain_len == 0 when no chain was captured
+     * (e.g. raw_candidates path). These are hifiasm's own colinear-DP anchors,
+     * exported so the caller need not re-derive them. */
+    uint64_t chain_offset;
+    uint32_t chain_len;
 } hifiasm_overlap_t;
 
 /*
@@ -218,6 +248,20 @@ void hifiasm_reads_store_release(void);
  * Run overlap detection over the ALREADY-LOADED store, returning overlaps in
  * memory. Same outputs/ownership as hifiasm_detect_overlaps_mem(), but reads
  * nothing from disk. The name table is taken from the loaded store.
+ *
+ *   out_chain     : receives a malloc()'d uint64_t arena holding every overlap's
+ *                   dense native chain anchors concatenated. Each
+ *                   hifiasm_overlap_t references its slice via
+ *                   (chain_offset, chain_len); each entry packs one anchor as
+ *                   (q_start<<32)|t_start (see hifiasm_overlap_t::chain_offset).
+ *                   May be NULL if the caller does not want the native chain, in
+ *                   which case chain_len is 0 on every overlap. *out_chain is
+ *                   also NULL when there are zero chain anchors overall.
+ *   out_chain_len : receives the total number of uint64_t anchors in *out_chain.
+ *                   May be NULL only if out_chain is NULL.
+ *
+ * Ownership: *out_chain (when requested) is owned by the caller and freed with
+ * free() (it is a plain uint64_t array, not part of hifiasm_overlaps_mem_free).
  */
 int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
                                        hifiasm_overlap_t **out_ov,
@@ -226,7 +270,9 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
                                        uint64_t **out_name_off,
                                        uint64_t *out_n_reads,
                                        uint16_t **out_cigar,
-                                       uint64_t *out_cigar_len);
+                                       uint64_t *out_cigar_len,
+                                       uint64_t **out_chain,
+                                       uint64_t *out_chain_len);
 
 /* The store-fed filter builder (hifiasm_build_filter_from_store) is declared
  * further down, next to hifiasm_build_filter(), because it shares that
@@ -311,8 +357,11 @@ int hifiasm_sketch_minimizers(const char *seq,
  * is_hpc you will sketch with, or the frequency counts won't correspond to the
  * minimizers you filter. For dinara's no-HPC marker path that means
  * k=w=<marker k> and is_hpc=0.
+ *
+ * (The hifiasm_filter_t type is forward-declared near the top of this header,
+ * next to hifiasm_ovlp_opt_t, so overlap detection can borrow a prebuilt
+ * filter; the definition of the underlying struct lives in the .cpp.)
  */
-typedef struct hifiasm_filter_s hifiasm_filter_t;
 
 /* Options for hifiasm_build_filter(). Zero-initialize and override as needed. */
 typedef struct {

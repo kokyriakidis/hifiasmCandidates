@@ -77,10 +77,33 @@ typedef struct {
     FILE *fp;
 } cal_ec_r_dbg_t;
 
+// One emitted overlap (whole overlap_region, not per-window) for the in-memory
+// sink: full box in the query-forward / target-alignment frame plus a slice into
+// this thread's dense-chain arena (och). Collected in the worker where the
+// overlap_region (and its z->chain) is in scope, then pushed once per overlap in
+// the dump step. The per-window ma_hit_t path below is retained only for the
+// file-PAF output.
+typedef struct {
+    uint32_t q_id, t_id;
+    uint32_t q_start, q_end;   // query forward coords (x_pos_s .. x_pos_e+1)
+    uint32_t t_start, t_end;   // target forward coords (already rev-adjusted)
+    uint32_t n_match, block_len;
+    uint8_t  rev;              // 1 => reverse (is_same_strand = !rev)
+    uint32_t cig_t_start;      // target anchor in the alignment frame
+    uint64_t chain_off;        // offset into och of this overlap's chain
+    uint32_t chain_len;        // number of anchors
+} r_dbg_ovlp_rec_t;
+
+typedef struct { size_t n, m; r_dbg_ovlp_rec_t *a; } r_dbg_ovlp_vec_t;
+
 typedef struct {
 	ma_hit_t *a;
     size_t n, m;
     asg16_v ec;
+    // Per-overlap records + their dense-chain anchor arena (only filled when the
+    // in-memory sink is active; the file-PAF path leaves these empty).
+    r_dbg_ovlp_vec_t ov;       // .a/.n/.m records
+    asg64_v och;               // packed (q_start<<32)|t_start anchors
 } r_dbg_step_res_t;
 
 typedef struct { // data structure for each step in kt_pipeline()
@@ -617,12 +640,52 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
     // stderr_phase_ovlp(&b->olist);
     gen_hc_r_alin_ea(&b->olist, &b->clist, &R_INF, &b->self_read, &b->ovlp_read, &b->exz, aux_o, asm_opt.max_ov_diff_ec, (asm_opt.is_ont)?(WINDOW_OHC):(WINDOW_HC), i, E_KHIT, 1, &b->v16, &b->v64, &(R_INF.paf[i]), 0, -1, -1);
 
+    // When the in-memory sink is active, dinara consumes one record per overlap
+    // (full box + native dense chain), not per window. Collect those here where
+    // z->chain is in scope; the per-window ma_hit_t loop below still runs for the
+    // file-PAF path.
+    const int toMem = hifiasm_ovlp_sink_active();
+
     uint32_t k, m, tl; overlap_region *z; bit_extz_t ez; ma_hit_t *t; 
     for (k = 0; k < b->olist.length; k++) {
         z = &(b->olist.list[k]);
         if(!(z->w_list.n)) continue;
 
         tl = Get_READ_LENGTH((R_INF), z->y_id);
+
+        if (toMem) {
+            // One per-overlap record for the sink. Box: forward query
+            // (x_pos_s..x_pos_e+1) vs forward-strand target (rev-adjusted like
+            // the window path). The native chain (z->chain) is in the alignment
+            // frame (forward query, alignment-orientation target); dinara
+            // reframes it exactly like the CIGAR using cig_t_start = y_pos_s
+            // (the overlap's alignment-orientation target start).
+            r_dbg_ovlp_rec_t *ov;
+            kv_pushp(r_dbg_ovlp_rec_t, rr->ov, &ov);
+            ov->q_id = z->x_id; ov->t_id = z->y_id;
+            ov->q_start = z->x_pos_s; ov->q_end = z->x_pos_e + 1;
+            ov->rev = (uint8_t)z->y_pos_strand;
+            if (!ov->rev) {
+                ov->t_start = z->y_pos_s;
+                ov->t_end   = z->y_pos_e + 1;
+            } else {
+                ov->t_start = tl - (z->y_pos_e + 1);
+                ov->t_end   = tl - z->y_pos_s;
+            }
+            ov->cig_t_start = z->y_pos_s; // alignment-orientation target start
+            ov->n_match = z->shared_seed > 0 ? (uint32_t)z->shared_seed : 0;
+            ov->block_len = ov->q_end - ov->q_start;
+            // Copy this overlap's dense chain into the thread-local arena.
+            ov->chain_off = rr->och.n;
+            ov->chain_len = z->chain.length;
+            if (z->chain.length) {
+                kv_resize(uint64_t, rr->och, rr->och.n + z->chain.length);
+                memcpy(rr->och.a + rr->och.n, z->chain.buffer,
+                       z->chain.length * sizeof(uint64_t));
+                rr->och.n += z->chain.length;
+            }
+        }
+
         for (m = 0; m < z->w_list.n; m++) {
             if(is_ualn_win(z->w_list.a[m])) continue;
             set_bit_extz_t(ez, (*z), m);
@@ -756,6 +819,33 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
         cal_ec_r_dbg_step_t *s = (cal_ec_r_dbg_step_t*)in; uint64_t k, z; bit_extz_t ez; memset(&ez, 0, sizeof(ez));
         // UC_Read qu; UC_Read tu; init_UC_Read(&qu); init_UC_Read(&tu); 
         const int toMem = hifiasm_ovlp_sink_active();
+        if (toMem) {
+            // Per-overlap emission: one sink record per overlap_region, carrying
+            // the full box and hifiasm's native dense chain. The per-window
+            // ma_hit_t records (s->res[k].a) are not used on this path; they are
+            // built only for the file-PAF branch below. No base CIGAR is pushed
+            // (dinara re-derives alignment from the chain), so cigar=(NULL,0).
+            for (k = 0; k < p->n_thread; k++) {
+                r_dbg_step_res_t *r = &s->res[k];
+                for (z = 0; z < r->ov.n; z++) {
+                    r_dbg_ovlp_rec_t *o = &r->ov.a[z];
+                    const uint64_t *chain =
+                        o->chain_len ? (r->och.a + o->chain_off) : NULL;
+                    hifiasm_ovlp_sink_push(
+                        o->q_id, o->t_id,
+                        o->q_start, o->q_end,
+                        o->t_start, o->t_end,
+                        o->n_match, o->block_len,
+                        (uint8_t)(o->rev == 0),
+                        /*cigar*/ NULL, /*cigar_len*/ 0, o->cig_t_start,
+                        chain, o->chain_len);
+                }
+                free(r->a); free(r->ec.a);
+                free(r->ov.a); free(r->och.a);
+            }
+            free(s->res); free(s);
+            return 0;
+        }
         for (k = 0; k < p->n_thread; k++) {
             for (z = 0; z < s->res[k].n; z++) {
                 ez.cigar.a = s->res[k].ec.a + s->res[k].a[z].bl; ez.cigar.n = ez.cigar.m = s->res[k].a[z].cc;
@@ -766,38 +856,10 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
                 // UC_Read_resize(tu, (s->res[k].a[z].te - s->res[k].a[z].ts));
                 // recover_UC_Read_sub_region(tu.seq, s->res[k].a[z].ts, s->res[k].a[z].te - s->res[k].a[z].ts, 0, &R_INF, s->res[k].a[z].tn); 
 
-                if (toMem) {
-                    // In-memory path: compute matches / block length from the
-                    // CIGAR exactly as print_ov_dbg_paf does, then push. q is
-                    // the PAF query (qns>>32), t the target (tn).
-                    uint64_t ci = 0; uint16_t c; uint32_t cl;
-                    uint64_t n_match = 0, blk_len = 0;
-                    for (ci = 0; ci < ez.cigar.n; ) {
-                        ci = pop_trace(&(ez.cigar), ci, &c, &cl);
-                        if (cm[c] == '=') n_match += cl;
-                        blk_len += cl;
-                    }
-                    // The CIGAR tokens run in the alignment frame: forward query
-                    // (anchored at qns low bits) against the target in ALIGNMENT
-                    // orientation. ts/te are forward-strand coords (already
-                    // rewritten for rev overlaps), so the target anchor in the
-                    // alignment frame is ts for '+' and (t_len - te) for '-'.
-                    uint32_t t_len = (uint32_t)Get_READ_LENGTH(R_INF, s->res[k].a[z].tn);
-                    uint32_t cig_t_start = (s->res[k].a[z].rev == 0)
-                        ? s->res[k].a[z].ts
-                        : (t_len - s->res[k].a[z].te);
-                    hifiasm_ovlp_sink_push(
-                        (uint32_t)(s->res[k].a[z].qns >> 32),
-                        s->res[k].a[z].tn,
-                        (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe,
-                        s->res[k].a[z].ts, s->res[k].a[z].te,
-                        (uint32_t)n_match, (uint32_t)blk_len,
-                        (uint8_t)(s->res[k].a[z].rev == 0),
-                        ez.cigar.a, (uint32_t)ez.cigar.n, cig_t_start);
-                } else {
-                    print_ov_dbg_paf(p->fp, NULL/**qu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].qns>>32)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), 
-                                NULL/**tu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].tn)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].tn)), (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe, Get_READ_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), s->res[k].a[z].ts, s->res[k].a[z].te, Get_READ_LENGTH(R_INF, (s->res[k].a[z].tn)), s->res[k].a[z].rev, &ez, cm);
-                }
+                // File-PAF path only (the in-memory sink path returned early
+                // above and emits per-overlap, not per-window).
+                print_ov_dbg_paf(p->fp, NULL/**qu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].qns>>32)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), 
+                            NULL/**tu.seq**/, Get_NAME(R_INF, (s->res[k].a[z].tn)), Get_NAME_LENGTH(R_INF, (s->res[k].a[z].tn)), (uint32_t)s->res[k].a[z].qns, s->res[k].a[z].qe, Get_READ_LENGTH(R_INF, (s->res[k].a[z].qns>>32)), s->res[k].a[z].ts, s->res[k].a[z].te, Get_READ_LENGTH(R_INF, (s->res[k].a[z].tn)), s->res[k].a[z].rev, &ez, cm);
             }
             free(s->res[k].a); free(s->res[k].ec.a);
         }

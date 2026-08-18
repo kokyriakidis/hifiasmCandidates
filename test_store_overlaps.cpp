@@ -194,7 +194,7 @@ int main(void)
     char *snames = NULL; uint64_t *soff = NULL; uint64_t snr = 0;
     rc = hifiasm_detect_overlaps_from_store(&opt,
                                             &sov, &sn, &snames, &soff, &snr,
-                                            NULL, NULL);
+                                            NULL, NULL, NULL, NULL);
     CHECK(rc == 0, "store overlap path rc==0");
     CHECK(snr == fnr, "store path read count matches file path");
 

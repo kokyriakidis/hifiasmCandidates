@@ -49,11 +49,15 @@ typedef struct {
     uint16_t          *cigar;    /* concatenated CIGAR token arena */
     uint64_t           cig_n;    /* tokens used */
     uint64_t           cig_m;    /* token capacity */
+    uint64_t          *chain;    /* concatenated dense-chain anchor arena */
+    uint64_t           chn_n;    /* anchors used */
+    uint64_t           chn_m;    /* anchor capacity */
     pthread_mutex_t    mtx;
 } hifiasm_ovlp_sink_t;
 
 static hifiasm_ovlp_sink_t g_sink = {
-    0, NULL, 0, 0, NULL, NULL, 0, 0, NULL, 0, 0, PTHREAD_MUTEX_INITIALIZER
+    0, NULL, 0, 0, NULL, NULL, 0, 0, NULL, 0, 0, NULL, 0, 0,
+    PTHREAD_MUTEX_INITIALIZER
 };
 
 int hifiasm_ovlp_sink_active(void)
@@ -67,7 +71,8 @@ void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
                             uint32_t n_match, uint32_t block_len,
                             uint8_t is_same_strand,
                             const uint16_t *cigar, uint32_t cigar_len,
-                            uint32_t cigar_t_start)
+                            uint32_t cigar_t_start,
+                            const uint64_t *chain, uint32_t chain_len)
 {
     if (!g_sink.active) return;
     pthread_mutex_lock(&g_sink.mtx);
@@ -112,6 +117,32 @@ void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
         }
     }
 
+    /* Append dense chain anchors to the shared arena. On OOM, drop just the
+     * chain (chain_len=0) rather than the whole overlap; the consumer treats a
+     * missing chain as "no native chain for this overlap". */
+    uint64_t chn_off = g_sink.chn_n;
+    uint32_t stored_chain = 0;
+    if (chain != NULL && chain_len > 0) {
+        if (g_sink.chn_n + chain_len > g_sink.chn_m) {
+            uint64_t nm = g_sink.chn_m ? g_sink.chn_m : 65536;
+            while (nm < g_sink.chn_n + chain_len) nm <<= 1;
+            uint64_t *nc =
+                (uint64_t*)realloc(g_sink.chain, nm * sizeof(uint64_t));
+            if (nc != NULL) {
+                g_sink.chain = nc;
+                g_sink.chn_m = nm;
+            }
+        }
+        if (g_sink.chn_n + chain_len <= g_sink.chn_m) {
+            memcpy(g_sink.chain + g_sink.chn_n, chain,
+                   chain_len * sizeof(uint64_t));
+            g_sink.chn_n += chain_len;
+            stored_chain = chain_len;
+        } else {
+            chn_off = 0; /* arena grow failed: record no chain for this overlap */
+        }
+    }
+
     hifiasm_overlap_t *o = &g_sink.ov[g_sink.n++];
     o->q_id = q_id;   o->t_id = t_id;
     o->q_start = q_start; o->q_end = q_end;
@@ -121,6 +152,8 @@ void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
     o->cigar_offset = cig_off;
     o->cigar_len = stored_len;
     o->cigar_t_start = cigar_t_start;
+    o->chain_offset = chn_off;
+    o->chain_len = stored_chain;
     pthread_mutex_unlock(&g_sink.mtx);
 }
 
@@ -153,6 +186,7 @@ static void hifiasm_ovlp_sink_begin(void)
     g_sink.names = NULL; g_sink.name_off = NULL;
     g_sink.n_reads = 0; g_sink.name_len = 0;
     g_sink.cigar = NULL; g_sink.cig_n = 0; g_sink.cig_m = 0;
+    g_sink.chain = NULL; g_sink.chn_n = 0; g_sink.chn_m = 0;
     g_sink.active = 1;
     pthread_mutex_unlock(&g_sink.mtx);
 }
@@ -163,7 +197,8 @@ static void hifiasm_ovlp_sink_begin(void)
 static void hifiasm_ovlp_sink_end(hifiasm_overlap_t **out_ov, uint64_t *out_n,
                                   char **out_names, uint64_t **out_name_off,
                                   uint64_t *out_n_reads,
-                                  uint16_t **out_cigar, uint64_t *out_cigar_len)
+                                  uint16_t **out_cigar, uint64_t *out_cigar_len,
+                                  uint64_t **out_chain, uint64_t *out_chain_len)
 {
     pthread_mutex_lock(&g_sink.mtx);
     *out_ov       = g_sink.ov;
@@ -177,10 +212,17 @@ static void hifiasm_ovlp_sink_end(hifiasm_overlap_t **out_ov, uint64_t *out_n,
     } else {
         free(g_sink.cigar);
     }
+    if (out_chain != NULL) {
+        *out_chain = g_sink.chain;
+        if (out_chain_len != NULL) *out_chain_len = g_sink.chn_n;
+    } else {
+        free(g_sink.chain);
+    }
     g_sink.ov = NULL; g_sink.n = 0; g_sink.m = 0;
     g_sink.names = NULL; g_sink.name_off = NULL;
     g_sink.n_reads = 0; g_sink.name_len = 0;
     g_sink.cigar = NULL; g_sink.cig_n = 0; g_sink.cig_m = 0;
+    g_sink.chain = NULL; g_sink.chn_n = 0; g_sink.chn_m = 0;
     g_sink.active = 0;
     pthread_mutex_unlock(&g_sink.mtx);
 }
@@ -205,6 +247,10 @@ struct hifiasm_filter_s {
     int   k;   /* k the table was built with (for reference/debugging) */
     int   w;   /* w the table was built with */
     int   is_hpc;
+    int   hom_cov; /* peak homozygous coverage ha_ft_gen computed while building
+                    * this table (-1 if unknown). Reused by overlap detection
+                    * when this filter is supplied via hifiasm_ovlp_opt_t::filter,
+                    * so it need not recompute the all-kmer coverage histogram. */
 };
 
 /* Unwrap for passing to mz1_ha_sketch (which takes const void*). NULL-safe. */
@@ -368,11 +414,28 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
         return 2;
     }
 
+    /* Force no-HPC seeding when requested (see store path for rationale).
+     * CommandLine_process left HPC at hifiasm's default (on), so override. */
+    if (opt && opt->no_hpc) asm_opt.flag |=  HA_F_NO_HPC;
+    else if (opt)           asm_opt.flag &= ~HA_F_NO_HPC;
+
+    /* Optional filter reuse (mirrors the store path). */
+    extern void *g_reuse_flt_tab; extern int g_reuse_hom_cov;
+    if (opt && opt->filter) {
+        g_reuse_flt_tab = opt->filter->raw;
+        g_reuse_hom_cov = opt->filter->hom_cov;
+    } else {
+        g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
+    }
+
     hifiasm_ovlp_sink_begin();
     int ret = ha_detect_candidates();   /* emitters push into the sink */
+    /* The file/mem entry point does not expose the native chain arena; drop it
+     * (pass NULL) so the sink frees it internally. */
     hifiasm_ovlp_sink_end(out_ov, out_n_ov, out_names, out_name_off, out_n_reads,
-                          out_cigar, out_cigar_len);
+                          out_cigar, out_cigar_len, NULL, NULL);
 
+    g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
     destory_opt(&asm_opt);
     free(argv);
 
@@ -556,6 +619,14 @@ static int store_opt_from_ovlp(const hifiasm_ovlp_opt_t *opt)
     if (opt && opt->max_ov_diff > 0.0) asm_opt.max_ov_diff_ec = opt->max_ov_diff;
     if (opt && opt->raw_candidates)   asm_opt.dbg_ovec_cal = 1;
 
+    /* Homopolymer compression mode for seeding. hifiasm's overlap default is HPC
+     * ON (HA_F_NO_HPC clear). A caller whose markers live in RAW/no-HPC space
+     * (dinara) sets no_hpc=1 so overlap seed positions match its markers 1:1.
+     * ha_ft_gen / ha_pt_gen / mz1_ha_sketch all key HPC off !(flag&HA_F_NO_HPC),
+     * so this single flag flips the whole detection pass to no-HPC. */
+    if (opt && opt->no_hpc) asm_opt.flag |=  HA_F_NO_HPC;
+    else                    asm_opt.flag &= ~HA_F_NO_HPC;
+
     /* HiFi keeps every read (the file path sets rl_cut = -1 when !is_ont).
      * Leaving is_ont's rl_cut/sc_cut defaults for ONT matches the CLI. */
     if (!asm_opt.is_ont) { asm_opt.rl_cut = -1; asm_opt.sc_cut = 1; }
@@ -570,7 +641,9 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
                                        uint64_t **out_name_off,
                                        uint64_t *out_n_reads,
                                        uint16_t **out_cigar,
-                                       uint64_t *out_cigar_len)
+                                       uint64_t *out_cigar_len,
+                                       uint64_t **out_chain,
+                                       uint64_t *out_chain_len)
 {
     if (out_ov)        *out_ov = NULL;
     if (out_n_ov)      *out_n_ov = 0;
@@ -579,10 +652,13 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
     if (out_n_reads)   *out_n_reads = 0;
     if (out_cigar)     *out_cigar = NULL;
     if (out_cigar_len) *out_cigar_len = 0;
+    if (out_chain)     *out_chain = NULL;
+    if (out_chain_len) *out_chain_len = 0;
 
     if (out_ov == NULL || out_n_ov == NULL || out_names == NULL ||
         out_name_off == NULL || out_n_reads == NULL ||
-        (out_cigar != NULL && out_cigar_len == NULL)) {
+        (out_cigar != NULL && out_cigar_len == NULL) ||
+        (out_chain != NULL && out_chain_len == NULL)) {
         fprintf(stderr, "[hifiasm_detect_overlaps_from_store] invalid arguments\n");
         return 1;
     }
@@ -595,20 +671,36 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
     yak_reset_realtime();
     store_opt_from_ovlp(opt);
 
+    /* Filter reuse: hand the caller's prebuilt filter (and the coverage it was
+     * built with) to ha_detect_candidates_impl via the process-global handoff.
+     * When NULL the overlapper builds its own filter as before. Cleared after
+     * the call so it never leaks into a later invocation. */
+    extern void *g_reuse_flt_tab; extern int g_reuse_hom_cov;
+    if (opt && opt->filter) {
+        g_reuse_flt_tab = opt->filter->raw;
+        g_reuse_hom_cov = opt->filter->hom_cov;
+    } else {
+        g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
+    }
+
     hifiasm_ovlp_sink_begin();
     int ret = ha_detect_candidates_from_store();  /* leaves R_INF intact */
     hifiasm_ovlp_sink_end(out_ov, out_n_ov, out_names, out_name_off, out_n_reads,
-                          out_cigar, out_cigar_len);
+                          out_cigar, out_cigar_len, out_chain, out_chain_len);
 
+    g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
     destory_opt(&asm_opt);
 
     if (ret != 0) {
         hifiasm_overlaps_mem_free(*out_ov, *out_names, *out_name_off,
                                   out_cigar ? *out_cigar : NULL);
+        free(out_chain ? *out_chain : NULL);
         *out_ov = NULL; *out_n_ov = 0;
         *out_names = NULL; *out_name_off = NULL; *out_n_reads = 0;
         if (out_cigar)     *out_cigar = NULL;
         if (out_cigar_len) *out_cigar_len = 0;
+        if (out_chain)     *out_chain = NULL;
+        if (out_chain_len) *out_chain_len = 0;
         fprintf(stderr,
                 "[hifiasm_detect_overlaps_from_store] pipeline failed (%d)\n", ret);
         return ret;
@@ -720,7 +812,7 @@ hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
         fprintf(stderr, "[hifiasm_build_filter] out of memory\n");
         return NULL;
     }
-    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc;
+    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc; hf->hom_cov = hom_cov;
     return hf;
 }
 
@@ -780,7 +872,7 @@ hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *op
         fprintf(stderr, "[hifiasm_build_filter_from_store] out of memory\n");
         return NULL;
     }
-    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc;
+    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc; hf->hom_cov = hom_cov;
     return hf;
 }
 
