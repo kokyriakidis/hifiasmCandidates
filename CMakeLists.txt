@@ -50,6 +50,7 @@ set(HIFIASM_OVERLAPS_SOURCES
     ecovlp.cpp
     candidates.cpp
     hifiasm_overlaps.cpp
+    hifiasm_chain.cpp
     hetmer.cpp
     fakechain.cpp
     fakechain_bridge.cpp
@@ -141,4 +142,8 @@ if(HIFIASM_OVERLAPS_BUILD_EXE)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_link_options(hifiasm PRIVATE -Wl,--gc-sections)
     endif()
+
+    # Pure unit test for the per-pair chainer (no data files, no global stores).
+    add_executable(test_hifiasm_chain test_hifiasm_chain.cpp)
+    target_link_libraries(test_hifiasm_chain PRIVATE hifiasm_overlaps)
 endif()
