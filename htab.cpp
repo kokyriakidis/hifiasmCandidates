@@ -1133,11 +1133,11 @@ void *ha_ft_ug_gen(const hifiasm_opt_t *asm_opt, ma_utg_v *us, int is_HPC, int k
 	return (void*)flt_tab;
 }
 
-void *ha_ft_gen(const hifiasm_opt_t *asm_opt, All_reads *rs, int *hom_cov, int is_hp_mode, int read_from_store)
+void *ha_ft_gen(const hifiasm_opt_t *asm_opt, All_reads *rs, int *hom_cov, int *het_cov, int is_hp_mode, int read_from_store)
 {
 	yak_ft_t *flt_tab;
 	int64_t cnt[YAK_N_COUNTS];
-	int peak_hom, peak_het, cutoff = YAK_MAX_COUNT - 1, ex_flag = 0;
+	int peak_hom = -1, peak_het = -1, cutoff = YAK_MAX_COUNT - 1, ex_flag = 0;
 	if(is_hp_mode) ex_flag = HAF_RS_READ|HAF_SKIP_READ;
 	ha_ct_t *h; 
 	h = ha_count(asm_opt, HAF_COUNT_ALL|ex_flag|((read_from_store)?(HAF_RS_READ):(HAF_RS_WRITE_LEN)), !(asm_opt->flag&HA_F_NO_HPC), asm_opt->k_mer_length, asm_opt->mz_win, NULL, NULL, rs, NULL, 1, NULL, 0);
@@ -1155,6 +1155,7 @@ void *ha_ft_gen(const hifiasm_opt_t *asm_opt, All_reads *rs, int *hom_cov, int i
 		ha_ct_hist(h, cnt, asm_opt->thread_num);
 		peak_hom = ha_analyze_count(YAK_N_COUNTS, asm_opt->min_hist_kmer_cnt, asm_opt->hg_size>0?(h->bs/asm_opt->hg_size):(-1), cnt, &peak_het);
 		if (hom_cov) *hom_cov = peak_hom;
+		if (het_cov) *het_cov = peak_het;
 		if (peak_hom > 0) fprintf(stderr, "[M::%s] peak_hom: %d; peak_het: %d\n", __func__, peak_hom, peak_het);
 		///in default, asm_opt->high_factor = 5.0
 		cutoff = (int)(peak_hom * asm_opt->high_factor);

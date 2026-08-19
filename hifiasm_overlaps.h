@@ -431,6 +431,24 @@ hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *op
 int32_t hifiasm_filter_count(const hifiasm_filter_t *hf, uint64_t hash);
 
 /*
+ * Marker-coverage peaks hifiasm computed while building this filter (via
+ * ha_ft_gen's k-mer count histogram). These are hifiasm's authoritative
+ * coverage estimates, so a caller can populate its own coverage distribution
+ * from them instead of running a second histogram pass over the markers.
+ *
+ *   hom_cov : peak homozygous coverage (hifiasm's peak_hom)
+ *   het_cov : peak heterozygous coverage (hifiasm's peak_het)
+ *   low_cov : low-coverage cutoff hifiasm derives from the peaks
+ *             (mz_low_b(peak_hom, peak_het): het_cov/2, clamped to >= 2)
+ *
+ * Each returns -1 if the corresponding value is unknown (NULL filter or the
+ * count histogram was not produced).
+ */
+int hifiasm_filter_hom_cov(const hifiasm_filter_t *hf);
+int hifiasm_filter_het_cov(const hifiasm_filter_t *hf);
+int hifiasm_filter_low_cov(const hifiasm_filter_t *hf);
+
+/*
  * Test-only: return the raw underlying yak filter table (const void*) so tests
  * can call hifiasm's mz1_ha_sketch directly with the same hf the bridge uses,
  * and assert bit-for-bit parity. Not intended for production callers; NULL-safe.

@@ -251,6 +251,11 @@ struct hifiasm_filter_s {
                     * this table (-1 if unknown). Reused by overlap detection
                     * when this filter is supplied via hifiasm_ovlp_opt_t::filter,
                     * so it need not recompute the all-kmer coverage histogram. */
+    int   het_cov; /* peak heterozygous coverage from the same ha_ft_gen count
+                    * (-1 if unknown). Together with hom_cov this is hifiasm's
+                    * authoritative marker-coverage distribution, so dinara can
+                    * populate kmerDistributionInfo from it instead of running a
+                    * second histogram pass over the markers. */
 };
 
 /* Unwrap for passing to mz1_ha_sketch (which takes const void*). NULL-safe. */
@@ -783,10 +788,10 @@ hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
     else        asm_opt.flag |=  HA_F_NO_HPC;
     asm_opt.rl_cut = rl_cut;
 
-    int hom_cov = -1;
+    int hom_cov = -1, het_cov = -1;
     /* read_from_store=0: stream the files, writing read lengths (not
      * sequences) into R_INF and building the high-occurrence table. */
-    void *raw = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, /*is_hp_mode*/ 0,
+    void *raw = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, &het_cov, /*is_hp_mode*/ 0,
                           /*read_from_store*/ 0);
 
     /* Drop the transient store. ha_ft_gen with read_from_store=0 uses
@@ -812,7 +817,7 @@ hifiasm_filter_t *hifiasm_build_filter(const char *const *read_files,
         fprintf(stderr, "[hifiasm_build_filter] out of memory\n");
         return NULL;
     }
-    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc; hf->hom_cov = hom_cov;
+    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc; hf->hom_cov = hom_cov; hf->het_cov = het_cov;
     return hf;
 }
 
@@ -881,10 +886,10 @@ hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *op
      * here, so total_reads_bases is exact. */
     asm_opt.bf_shift = adaptive_bf_shift(R_INF.total_reads_bases);
 
-    int hom_cov = -1;
+    int hom_cov = -1, het_cov = -1;
     /* read_from_store=1: read sequences back from the pre-loaded R_INF and
      * build the high-occurrence table. R_INF is NOT modified or freed here. */
-    void *raw = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, /*is_hp_mode*/ 0,
+    void *raw = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, &het_cov, /*is_hp_mode*/ 0,
                           /*read_from_store*/ 1);
 
     destory_opt(&asm_opt);
@@ -901,7 +906,7 @@ hifiasm_filter_t *hifiasm_build_filter_from_store(const hifiasm_filter_opt_t *op
         fprintf(stderr, "[hifiasm_build_filter_from_store] out of memory\n");
         return NULL;
     }
-    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc; hf->hom_cov = hom_cov;
+    hf->raw = raw; hf->k = k; hf->w = w; hf->is_hpc = is_hpc; hf->hom_cov = hom_cov; hf->het_cov = het_cov;
     return hf;
 }
 
@@ -916,6 +921,24 @@ int32_t hifiasm_filter_count(const hifiasm_filter_t *hf, uint64_t hash)
 {
     if (hf == NULL || hf->raw == NULL) return 0;
     return ha_ft_cnt(hf->raw, hash);
+}
+
+int hifiasm_filter_hom_cov(const hifiasm_filter_t *hf)
+{
+    return hf ? hf->hom_cov : -1;
+}
+
+int hifiasm_filter_het_cov(const hifiasm_filter_t *hf)
+{
+    return hf ? hf->het_cov : -1;
+}
+
+int hifiasm_filter_low_cov(const hifiasm_filter_t *hf)
+{
+    /* mz_low_b is hifiasm's own low-coverage cutoff derived from the peaks
+     * (htab.h); mirror it so dinara's coverageLow matches hifiasm's notion. */
+    if (hf == NULL || hf->hom_cov < 0) return -1;
+    return mz_low_b(hf->hom_cov, hf->het_cov);
 }
 
 const void *hifiasm_filter_raw_for_test(const hifiasm_filter_t *hf)

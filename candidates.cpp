@@ -327,7 +327,7 @@ static int ha_detect_candidates_impl(int from_store)
         fprintf(stderr, "[M::%s] reusing caller-provided k-mer filter "
                 "(hom_cov=%d)\n", __func__, g_reuse_hom_cov);
     } else if (!(asm_opt.flag & HA_F_NO_KMER_FLT)) {
-        ha_flt_tab = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, 0, from_store);
+        ha_flt_tab = ha_ft_gen(&asm_opt, &R_INF, &hom_cov, NULL, 0, from_store);
         ha_opt_update_cov(&asm_opt, hom_cov);
     }
 
