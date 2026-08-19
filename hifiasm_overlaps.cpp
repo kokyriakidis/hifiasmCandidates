@@ -69,6 +69,7 @@ void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
                             uint32_t q_start, uint32_t q_end,
                             uint32_t t_start, uint32_t t_end,
                             uint32_t n_match, uint32_t block_len,
+                            uint32_t shared_seed,
                             uint8_t is_same_strand,
                             const uint16_t *cigar, uint32_t cigar_len,
                             uint32_t cigar_t_start,
@@ -148,6 +149,7 @@ void hifiasm_ovlp_sink_push(uint32_t q_id, uint32_t t_id,
     o->q_start = q_start; o->q_end = q_end;
     o->t_start = t_start; o->t_end = t_end;
     o->n_match = n_match; o->block_len = block_len;
+    o->shared_seed = shared_seed;
     o->is_same_strand = is_same_strand;
     o->cigar_offset = cig_off;
     o->cigar_len = stored_len;

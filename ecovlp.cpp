@@ -88,6 +88,8 @@ typedef struct {
     uint32_t q_start, q_end;   // query forward coords (x_pos_s .. x_pos_e+1)
     uint32_t t_start, t_end;   // target forward coords (already rev-adjusted)
     uint32_t n_match, block_len;
+    uint32_t shared_seed;      // hifiasm chain DP score (candidate stage); at
+                               // the EC stage this mirrors n_match's source
     uint8_t  rev;              // 1 => reverse (is_same_strand = !rev)
     uint32_t cig_t_start;      // target anchor in the alignment frame
     uint64_t chain_off;        // offset into och of this overlap's chain
@@ -674,6 +676,7 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
             }
             ov->cig_t_start = z->y_pos_s; // alignment-orientation target start
             ov->n_match = z->shared_seed > 0 ? (uint32_t)z->shared_seed : 0;
+            ov->shared_seed = ov->n_match;
             ov->block_len = ov->q_end - ov->q_start;
             // Copy this overlap's dense chain into the thread-local arena.
             ov->chain_off = rr->och.n;
@@ -836,6 +839,7 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
                         o->q_start, o->q_end,
                         o->t_start, o->t_end,
                         o->n_match, o->block_len,
+                        o->shared_seed,
                         (uint8_t)(o->rev == 0),
                         /*cigar*/ NULL, /*cigar_len*/ 0, o->cig_t_start,
                         chain, o->chain_len);

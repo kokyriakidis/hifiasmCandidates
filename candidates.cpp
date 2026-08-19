@@ -163,12 +163,14 @@ static void emit_candidates(overlap_region_alloc *ol)
             // The raw candidate set carries no base-level CIGAR (that is only
             // produced by the later gen_hc_r_alin_ea alignment pass), so push a
             // zero-length CIGAR: (NULL, 0) tokens, anchor 0.
+            uint32_t ss = o->shared_seed > 0 ? (uint32_t)o->shared_seed : 0;
             hifiasm_ovlp_sink_push(
                 o->x_id, o->y_id,
                 o->x_pos_s, o->x_pos_e + 1,
                 o->y_pos_s, o->y_pos_e + 1,
-                o->shared_seed > 0 ? (uint32_t)o->shared_seed : 0,
+                ss,
                 span,
+                ss,
                 (uint8_t)(o->y_pos_strand == 0),
                 NULL, 0, 0,
                 // Native dense chain captured during chaining. It is stored in

@@ -95,6 +95,14 @@ int hifiasm_detect_overlaps(const char *const *read_files,
  *   n_match          : residue matches (PAF col 10).
  *   block_len        : alignment block length (PAF col 11); the same value the
  *                      file path uses as the chain score / length filter key.
+ *   shared_seed      : hifiasm's minimizer-chain DP score for this overlap
+ *                      (overlap_region.shared_seed at the candidate/chaining
+ *                      stage, before error-correction repurposes the field).
+ *                      This is the key hifiasm itself ranks overlaps by when it
+ *                      keeps one chain per (target, strand) or a bounded set for
+ *                      repeats (oreg_ss_lt: shared_seed descending). Consumers
+ *                      that must pick a single overlap per read pair should
+ *                      select the maximum shared_seed to match hifiasm.
  *   is_same_strand   : 1 if the overlap is forward-forward (PAF strand '+'),
  *                      0 if reverse-complement (PAF strand '-').
  *   cigar_offset     : start index of this overlap's CIGAR in the token arena
@@ -128,6 +136,7 @@ typedef struct {
     uint32_t t_end;
     uint32_t n_match;
     uint32_t block_len;
+    uint32_t shared_seed;
     uint8_t  is_same_strand;
     uint64_t cigar_offset;
     uint32_t cigar_len;
