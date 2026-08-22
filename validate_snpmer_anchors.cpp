@@ -11,14 +11,17 @@
  *     column inside the read.
  *
  *  B. Producer-model prediction (replicates Shasta2SnpmerAnchors.cpp EXACTLY):
- *     bucket occurrences on dinara-KEPT reads by canonical key, dedup a read
- *     seen twice in one allele, drop reads shared by both alleles of a split,
- *     require both alleles >= minMembers (biallelic). For every surviving
- *     member predict the two stored anchor positions:
- *         canon (strand 0): snpCol
- *         rc    (strand 1): L - snpCol
- *     (appendHetAnchorPair stores rawPosition + hetK/2 = snpCol, and mirrors to
- *      L - rawPosition - hetK + hetK/2 = L - snpCol.)
+ *     bucket occurrences on dinara-KEPT reads by canonical key; DROP any read
+ *     that carries a key more than once (repeat: ambiguous column); drop reads
+ *     shared by both alleles of a split (paralog); require both alleles >=
+ *     minMembers (biallelic). Each occurrence is placed in its canonical k-mer
+ *     orientation o (0 if forward k-mer == key, else 1). The canonical anchor
+ *     sits on strand o at column canonCol = (o==0? snpCol : L - snpCol); the RC
+ *     anchor sits on strand o^1 at L - canonCol. (appendHetAnchorPair stores
+ *     rawPosition + hetKHalf and mirrors to the opposite strand at L - column.)
+ *     Per-occurrence orientation keeps genomic-forward and genomic-reverse
+ *     reads on the same strand for a given allele, so shasta2 sees a single
+ *     intra-read order and does not build A<->B 2-cycles.
  *
  *  C. Cross-check vs dinara's actual store (DINARA_SNPMER_DUMP output):
  *     the predicted (key, readName, strand, storedPos) set must EQUAL the dumped
@@ -109,16 +112,18 @@ int main(int argc,char** argv){
 
     /* ================= LAYER A: SNP-column correctness ================= */
     uint64_t occTotal=0, occKeptRead=0, aBadMid=0, aBadFwdBase=0, aOob=0;
-    struct Member{ std::string name; uint32_t snpCol; uint32_t L; };
+    /* o = per-occurrence canonical orientation (0 fwd == key, 1 == RC(key)). */
+    struct Member{ std::string name; uint32_t snpCol; uint32_t L; int o; };
     std::unordered_map<uint64_t,std::vector<Member>> byKey;      /* allele bucket */
     std::unordered_map<uint64_t,std::vector<uint64_t>> keysBySplit;
 
-    /* All valid SNP columns of a (key, readName) pair. A key can occur at
-     * several positions on one read (a repeat); the producer's dedup keeps ONE
-     * of them, but WHICH one is an order-dependent tiebreak. Correctness only
-     * requires the stored anchor position to be a genuine SNP column of that key
-     * on that read, so Layer C checks storedPos against this set, not a single
-     * predicted occurrence. Key: name + "\t" + hex(key). */
+    /* Valid stored SNP columns of a (key, readName, strand) triple. The producer
+     * places each occurrence in the canonical k-mer strand o and stores the SNP
+     * column in that strand's frame (o==0 -> snpCol, o==1 -> L - snpCol); the RC
+     * anchor mirrors it to the opposite strand at L - storedCol. A key may occur
+     * several times on one read (a repeat); such reads are DROPPED, so a valid
+     * (key,read,strand) has exactly one column. Layer C checks storedPos against
+     * this set. Key string: name + "\t" + hex(key) + "\t" + strand. */
     std::unordered_map<std::string,std::vector<uint32_t>> validCols;
     /* readName -> read length (kept reads only). */
     std::unordered_map<std::string,uint32_t> readLenOf;
@@ -151,14 +156,14 @@ int main(int argc,char** argv){
             /* Only dinara-kept reads participate in producer prediction. */
             if(kit==keptLen.end()) continue;
             ++occKeptRead;
-            if(snpCol<1 || (uint64_t)snpCol+1>=L) continue; /* producer OOB gate */
 
-            byKey[key].push_back(Member{nm,snpCol,L});
+            /* Per-occurrence orientation and the SNP column in that frame. */
+            const int o = (canonMid==fwdMid) ? 0 : 1;
+            const uint32_t canonCol = (o==0) ? snpCol : (L - snpCol);
+            if(canonCol<1 || (uint64_t)canonCol+1>=L) continue; /* producer OOB */
+
+            byKey[key].push_back(Member{nm,snpCol,L,o});
             readLenOf[nm]=L;
-            {   /* record this as a valid SNP column for (key,read) */
-                char kb[24]; snprintf(kb,sizeof(kb),"%016llx",(unsigned long long)key);
-                validCols[nm+"\t"+kb].push_back(snpCol);
-            }
             const uint64_t split=key&splitMask;
             auto& ks=keysBySplit[split];
             if(std::find(ks.begin(),ks.end(),key)==ks.end()) ks.push_back(key);
@@ -166,13 +171,20 @@ int main(int argc,char** argv){
     }
 
     /* ============ LAYER B: replicate producer gates & predict ============ */
-    /* dedup a read seen twice in the SAME allele (keep first) */
+    /* DROP any read that occurs more than once in the SAME allele (repeat key:
+     * ambiguous column). This matches the producer, which removes such reads
+     * entirely rather than keeping an arbitrary copy. */
+    uint64_t repeatDropped=0;
     for(auto& kv:byKey){
         auto& m=kv.second;
         std::sort(m.begin(),m.end(),[](const Member&a,const Member&b){
             return a.name<b.name; });
-        m.erase(std::unique(m.begin(),m.end(),[](const Member&a,const Member&b){
-            return a.name==b.name; }),m.end());
+        std::vector<Member> kept; kept.reserve(m.size());
+        for(size_t i=0;i<m.size();){ size_t j=i;
+            while(j<m.size() && m[j].name==m[i].name) ++j;
+            if(j-i==1) kept.push_back(m[i]); else repeatDropped+=(j-i);
+            i=j; }
+        m.swap(kept);
     }
     /* paralog drop: read shared by >1 allele of a split */
     for(auto& sk:keysBySplit){
@@ -186,11 +198,10 @@ int main(int argc,char** argv){
         }
     }
 
-    /* Predicted placement SET: which (key, name, strand) pairs must appear in
-     * the store. This set is order-independent (dedup only removes duplicate
-     * READS, and a read either survives all gates or not). The exact stored
-     * POSITION is validated separately in Layer C against validCols, because
-     * for a repeat key the surviving occurrence's column is a tiebreak choice. */
+    /* Predicted placement SET: (key, name, strand). For each surviving member,
+     * the canonical anchor sits on strand o at column canonCol, and the RC
+     * anchor on strand o^1 at column L-canonCol. Record the valid stored column
+     * for each (key,name,strand) so Layer C can check the exact position. */
     struct PKey{ uint64_t key; std::string name; int strand;
         bool operator==(const PKey&o)const{
             return key==o.key&&strand==o.strand&&name==o.name; } };
@@ -198,6 +209,10 @@ int main(int argc,char** argv){
         return std::hash<uint64_t>()(p.key)^(std::hash<std::string>()(p.name)*1315423911u)
                ^(size_t)(p.strand*2654435761u); } };
     std::unordered_set<PKey,PKeyHash> predicted;
+    auto recordCol=[&](uint64_t key,const std::string& name,int strand,uint32_t col){
+        char kb[24]; snprintf(kb,sizeof(kb),"%016llx",(unsigned long long)key);
+        validCols[name+"\t"+kb+"\t"+std::to_string(strand)].push_back(col);
+    };
 
     uint64_t sitesEmitted=0, allelesAppended=0;
     for(auto& sk:keysBySplit){
@@ -210,13 +225,18 @@ int main(int argc,char** argv){
             auto& m=byKey[key];
             if(m.size()<minMembers) continue;
             for(auto& x:m){
-                predicted.insert(PKey{key,x.name,0});   /* canon strand0 */
-                predicted.insert(PKey{key,x.name,1});   /* rc    strand1 */
+                const uint32_t canonCol=(x.o==0)? x.snpCol : (x.L - x.snpCol);
+                const uint32_t rcCol   = x.L - canonCol;
+                predicted.insert(PKey{key,x.name,x.o});
+                predicted.insert(PKey{key,x.name,x.o^1});
+                recordCol(key,x.name,x.o,   canonCol);
+                recordCol(key,x.name,x.o^1, rcCol);
             }
             ++allelesAppended; emitted=true;
         }
         if(emitted) ++sitesEmitted;
     }
+    (void)repeatDropped;
 
     /* ================ LAYER C: cross-check vs dinara dump ================ */
     std::unordered_map<PKey,uint32_t,PKeyHash> dumped;
@@ -241,19 +261,18 @@ int main(int argc,char** argv){
         free(line); fclose(f);
     }
 
-    /* Helper: is `col` a valid SNP column of (key,name)? */
-    auto isValidCol=[&](uint64_t key,const std::string& name,uint32_t col)->bool{
+    /* Helper: is `col` a valid stored column of (key,name,strand)? */
+    auto isValidCol=[&](uint64_t key,const std::string& name,int strand,uint32_t col)->bool{
         char kb[24]; snprintf(kb,sizeof(kb),"%016llx",(unsigned long long)key);
-        auto it=validCols.find(name+"\t"+kb);
+        auto it=validCols.find(name+"\t"+kb+"\t"+std::to_string(strand));
         if(it==validCols.end()) return false;
         return std::find(it->second.begin(),it->second.end(),col)!=it->second.end();
     };
 
     /* C1: every predicted (key,read,strand) must appear in the dump.
      * C2: every dumped row must have been predicted.
-     * C3: every dumped storedPos must be a genuine SNP column:
-     *       strand0: storedPos itself
-     *       strand1: L - storedPos   (canon column mirrored back) */
+     * C3: every dumped storedPos must equal the predicted stored column for
+     *     that (key,read,strand). */
     uint64_t matched=0, badPos=0, missingInDump=0, extraInDump=0;
     for(auto& pk:predicted){
         if(dumped.find(pk)==dumped.end()){ ++missingInDump;
@@ -270,15 +289,10 @@ int main(int argc,char** argv){
                     (unsigned long long)pk.key,pk.name.c_str(),pk.strand,storedPos);
             continue;
         }
-        uint32_t canonCol;
-        if(pk.strand==0) canonCol=storedPos;
-        else { auto lit=readLenOf.find(pk.name);
-               if(lit==readLenOf.end()){ ++badPos; continue; }
-               canonCol=lit->second - storedPos; }
-        if(!isValidCol(pk.key,pk.name,canonCol)){ ++badPos;
+        if(!isValidCol(pk.key,pk.name,pk.strand,storedPos)){ ++badPos;
             if(badPos<=5)
-                fprintf(stderr,"[POS ] key=%016llx %s str%d storedPos=%u canonCol=%u not a valid SNP column\n",
-                    (unsigned long long)pk.key,pk.name.c_str(),pk.strand,storedPos,canonCol);
+                fprintf(stderr,"[POS ] key=%016llx %s str%d storedPos=%u not a predicted column\n",
+                    (unsigned long long)pk.key,pk.name.c_str(),pk.strand,storedPos);
             continue;
         }
         ++matched;
