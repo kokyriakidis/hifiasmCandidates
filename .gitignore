@@ -22,3 +22,4 @@ core.*
 *.fq.gz
 *.ovlp.paf
 *.candidates.paf
+validate_snpmer_anchors
