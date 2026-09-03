@@ -51,64 +51,9 @@ set(HIFIASM_OVERLAPS_SOURCES
     candidates.cpp
     hifiasm_overlaps.cpp
     hifiasm_chain.cpp
-    hetmer.cpp
-    fakechain.cpp
-    fakechain_bridge.cpp
 )
 
-# --- Bundled myloasm SNPmer engine (external/myloasm, Rust staticlib). --------
-# hetmer.cpp / fakechain*.cpp call its C ABI (myloasm_ffi.h), so the library and
-# any consumer must link libmyloasm.a plus the native libs cargo reports. We
-# build it with cargo at configure/build time, mirroring the Makefile.
-find_program(CARGO_EXECUTABLE cargo)
-if(NOT CARGO_EXECUTABLE)
-    message(FATAL_ERROR
-        "cargo (Rust toolchain) not found. The bundled myloasm SNPmer engine is "
-        "required. Install Rust via https://rustup.rs and re-run cmake.")
-endif()
-
-set(MYLOASM_DIR "${CMAKE_CURRENT_SOURCE_DIR}/external/myloasm")
-if(NOT EXISTS "${MYLOASM_DIR}/Cargo.toml")
-    message(FATAL_ERROR
-        "external/myloasm is not checked out. Run:\n"
-        "  git submodule update --init --recursive")
-endif()
-set(MYLOASM_LIB "${MYLOASM_DIR}/target/release/libmyloasm.a")
-
-# Track the Rust sources so cargo reruns when the engine changes (otherwise the
-# custom command only fires when libmyloasm.a is missing, and edits to *.rs /
-# Cargo.toml are silently ignored, leaving a stale staticlib).
-file(GLOB_RECURSE MYLOASM_RUST_SOURCES CONFIGURE_DEPENDS
-    "${MYLOASM_DIR}/src/*.rs")
-add_custom_command(
-    OUTPUT "${MYLOASM_LIB}"
-    COMMAND ${CARGO_EXECUTABLE} build --release
-            --manifest-path "${MYLOASM_DIR}/Cargo.toml"
-    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-    DEPENDS ${MYLOASM_RUST_SOURCES} "${MYLOASM_DIR}/Cargo.toml"
-    COMMENT "Building bundled myloasm SNPmer engine (cargo build --release)"
-    VERBATIM)
-add_custom_target(myloasm_engine DEPENDS "${MYLOASM_LIB}")
-
-# Native libs cargo links against for a staticlib (cargo rustc
-# --print native-static-libs); required at final link of any consumer.
-# cargo reports the unwinder as -lgcc_s, but that name resolves only to the
-# SHARED libgcc_s.so; a consumer linking with -static (e.g. dinara) cannot use
-# it and fails with "cannot find -lgcc_s". libgcc_eh.a exposes the same
-# _Unwind_* symbols as a static archive and links in both static and dynamic
-# final executables, so resolve its absolute path and use that instead.
-execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -print-file-name=libgcc_eh.a
-    OUTPUT_VARIABLE MYLOASM_GCC_EH
-    OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NOT MYLOASM_GCC_EH OR NOT EXISTS "${MYLOASM_GCC_EH}")
-    # Fall back to the shared unwinder if the static archive is unavailable.
-    set(MYLOASM_GCC_EH gcc_s)
-endif()
-set(MYLOASM_SYS_LIBS "${MYLOASM_GCC_EH}" util rt dl)
-
 add_library(hifiasm_overlaps STATIC ${HIFIASM_OVERLAPS_SOURCES})
-add_dependencies(hifiasm_overlaps myloasm_engine)
 
 # Match the Makefile's architecture/optimization flags. These ISA flags target
 # x86-64; adjust for other architectures.
@@ -124,10 +69,6 @@ target_include_directories(hifiasm_overlaps PUBLIC
 
 target_link_libraries(hifiasm_overlaps PUBLIC
     ZLIB::ZLIB Threads::Threads m
-    # Bundled myloasm staticlib + the native libs it depends on. PUBLIC so a
-    # consumer that links hifiasm_overlaps pulls these transitively.
-    "${MYLOASM_LIB}"
-    ${MYLOASM_SYS_LIBS}
 )
 
 # Note: the dead error-correction/assembly code has been pruned from

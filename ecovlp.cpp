@@ -94,6 +94,8 @@ typedef struct {
     uint32_t cig_t_start;      // target anchor in the alignment frame
     uint64_t chain_off;        // offset into och of this overlap's chain
     uint32_t chain_len;        // number of anchors
+    uint64_t cig_off;          // offset into this thread's ec (cigar) arena
+    uint32_t cig_len;          // token count; 0 => no windows aligned
 } r_dbg_ovlp_rec_t;
 
 typedef struct { size_t n, m; r_dbg_ovlp_rec_t *a; } r_dbg_ovlp_vec_t;
@@ -655,6 +657,8 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
 
         tl = Get_READ_LENGTH((R_INF), z->y_id);
 
+        r_dbg_ovlp_rec_t *ov = NULL;
+        uint64_t ovCigOff = 0;
         if (toMem) {
             // One per-overlap record for the sink. Box: forward query
             // (x_pos_s..x_pos_e+1) vs forward-strand target (rev-adjusted like
@@ -662,7 +666,6 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
             // frame (forward query, alignment-orientation target); dinara
             // reframes it exactly like the CIGAR using cig_t_start = y_pos_s
             // (the overlap's alignment-orientation target start).
-            r_dbg_ovlp_rec_t *ov;
             kv_pushp(r_dbg_ovlp_rec_t, rr->ov, &ov);
             ov->q_id = z->x_id; ov->t_id = z->y_id;
             ov->q_start = z->x_pos_s; ov->q_end = z->x_pos_e + 1;
@@ -687,6 +690,14 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
                        z->chain.length * sizeof(uint64_t));
                 rr->och.n += z->chain.length;
             }
+            // The per-window CIGAR tokens below are appended to rr->ec
+            // sequentially, starting here, for every window of THIS overlap
+            // (no other overlap's tokens can land in between within this
+            // single-threaded per-overlap loop body). Record the start now;
+            // the total span becomes known once the window loop below
+            // finishes appending. rr->ov is not resized again before then, so
+            // `ov` stays valid across the loop.
+            ovCigOff = rr->ec.n;
         }
 
         for (m = 0; m < z->w_list.n; m++) {
@@ -704,7 +715,7 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
             t->te = z->w_list.a[m].y_end + 1;
 
             t->rev = z->y_pos_strand;
-            
+
             t->bl = rr->ec.n;
             kv_resize(uint16_t, rr->ec, rr->ec.n + ez.cigar.n);
             memcpy(rr->ec.a + rr->ec.n, ez.cigar.a, ez.cigar.n * sizeof((*(rr->ec.a))));
@@ -715,6 +726,15 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
                 t->ts = tl - z->w_list.a[m].y_end - 1;
                 t->te = tl - z->w_list.a[m].y_start;
             }
+        }
+
+        if (toMem) {
+            // Whole-overlap CIGAR span: every window's tokens for THIS
+            // overlap, concatenated in window order (window-boundary
+            // information is not preserved, matching the box-level, not
+            // per-window, granularity of the rest of this record).
+            ov->cig_off = ovCigOff;
+            ov->cig_len = uint32_t(rr->ec.n - ovCigOff);
         }
     }
 }
@@ -824,16 +844,19 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
         const int toMem = hifiasm_ovlp_sink_active();
         if (toMem) {
             // Per-overlap emission: one sink record per overlap_region, carrying
-            // the full box and hifiasm's native dense chain. The per-window
-            // ma_hit_t records (s->res[k].a) are not used on this path; they are
-            // built only for the file-PAF branch below. No base CIGAR is pushed
-            // (dinara re-derives alignment from the chain), so cigar=(NULL,0).
+            // the full box, hifiasm's native dense chain, AND the whole-overlap
+            // CIGAR (every window's tokens concatenated in window order -- see
+            // worker_hap_ec_dbg_paf). The per-window ma_hit_t records
+            // (s->res[k].a) are additionally still built for the file-PAF
+            // branch below; the sink path does not consume them.
             for (k = 0; k < p->n_thread; k++) {
                 r_dbg_step_res_t *r = &s->res[k];
                 for (z = 0; z < r->ov.n; z++) {
                     r_dbg_ovlp_rec_t *o = &r->ov.a[z];
                     const uint64_t *chain =
                         o->chain_len ? (r->och.a + o->chain_off) : NULL;
+                    const uint16_t *cig =
+                        o->cig_len ? (r->ec.a + o->cig_off) : NULL;
                     hifiasm_ovlp_sink_push(
                         o->q_id, o->t_id,
                         o->q_start, o->q_end,
@@ -841,7 +864,7 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
                         o->n_match, o->block_len,
                         o->shared_seed,
                         (uint8_t)(o->rev == 0),
-                        /*cigar*/ NULL, /*cigar_len*/ 0, o->cig_t_start,
+                        cig, o->cig_len, o->cig_t_start,
                         chain, o->chain_len);
                 }
                 free(r->a); free(r->ec.a);

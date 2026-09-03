@@ -7,7 +7,6 @@
 #include "ksort.h"
 #include "Correct.h"
 #include "kalloc.h"
-#include "hetmer.h"
 
 #define MAX_HIGH_OCC     8   // TODO: don't hard code if we need to tune this parameter
 #define MAX_MAX_HIGH_OCC 16
@@ -575,45 +574,6 @@ void sf##_ha_sketch(const char *str, int len, int w, int k, uint32_t rid, int is
 	/**debug_pl(str, len, w, k, is_hpc, p, hf, mt);**/\
     if (sample_dist > w) sf##_select_mz_h(p, mt, len, sample_dist, ws, k, tl);\
     if (dp_min_len > 0 && pt && mt) sf##_refine_sketch(p, pt, len, dp_min_len, dp_e, min_freq, mt, km);\
-    /**Het-mer seeding DISABLED: the second-pass overlap refinement now derives\
-       its anchors from myloasm SNPmers (open syncmers + SNPmers) via the\
-       fakechain path, so we no longer force-emit het-mer minimizers into the\
-       first-pass sketch. The block below is disabled with a statically-false\
-       guard (this is inside a macro, so #if 0 / block comments cannot be used);\
-       the compiler dead-code-eliminates it. Kept for easy re-enabling in\
-       experiments. See hetmer.{h,cpp} and fakechain.{h,cpp}.**/\
-    if (0 /*DISABLED*/ && g_hetmer_set != NULL) {\
-        int hk = hetmer_k(g_hetmer_set);\
-        if (len >= hk) {\
-            uint64_t hmask = (hk >= 32) ? ~0ULL : ((1ULL<<(2*hk)) - 1);\
-            int hmid = (hk - 1) / 2;\
-            uint64_t hsplit = hmask & ~(3ULL << (2*hmid));\
-            uint64_t hfwd = 0, hrev = 0;\
-            uint64_t hshift = 2*(hk - 1);\
-            int hl = 0, hi;\
-            for (hi = 0; hi < len; ++hi) {\
-                int hc = seq_nt4_table[(uint8_t)str[hi]];\
-                if (hc >= 4) { hl = 0; hfwd = hrev = 0; continue; }\
-                hfwd = ((hfwd << 2) | (uint64_t)hc) & hmask;\
-                hrev = (hrev >> 2) | ((uint64_t)(3 - hc) << hshift);\
-                if (++hl < hk) continue;\
-                uint64_t hsf = hfwd & hsplit, hsr = hrev & hsplit;\
-                int hz = (hsf < hsr) ? 0 : 1;\
-                uint64_t hcanon = hz ? hrev : hfwd;\
-                if (hetmer_contains(g_hetmer_set, hcanon)) {\
-                    HType hinfo;\
-                    hinfo.x = yak_hash64_64(hfwd) + yak_hash64_64(hrev);\
-                    hinfo.rid = 0;\
-                    hinfo.pos = hi; /**raw end coordinate, matches main loop pos**/\
-                    hinfo.rev = hz;\
-                    hinfo.span = (uint8_t)hk;\
-                    kv_push_km(km, HType, *p, hinfo);\
-                    kv_push_km(km, uint64_t, *mt, (uint64_t)hl);\
-                    g_hetmer_emitted++;\
-                }\
-            }\
-        }\
-    }\
 	for (i = 0; i < (int)p->n; ++i) /**populate .rid as this was keeping counts**/\
 		p->a[i].rid = rid;\
 }
