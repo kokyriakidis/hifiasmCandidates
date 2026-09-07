@@ -1365,7 +1365,194 @@ int load_ct_index(void **i_ct_idx, char* file_name)
 	return 1;
 }
 
+int write_pt_index(void *flt_tab, ha_pt_t *ha_idx, All_reads* r, hifiasm_opt_t* opt, char* file_name)
+{
+    char* gfa_name = (char*)malloc(strlen(file_name)+64);
+    sprintf(gfa_name, "%s.pt_flt", file_name);
+    FILE* fp = fopen(gfa_name, "w");
+	if (!fp) {
+		free(gfa_name);
+        return 0;
+    }
+	yak_ft_t *ha_flt_tab = (yak_ft_t*)flt_tab;
 
+	if(ha_flt_tab)
+	{
+		fwrite("f", 1, 1, fp);
+		yak_ft_save(ha_flt_tab, fp);
+	}
+
+
+	if(ha_idx)
+	{
+		int i;
+		ha_pt1_t *g;
+		fwrite("h", 1, 1, fp);
+		fwrite(&ha_idx->k, sizeof(ha_idx->k), 1, fp);
+		fwrite(&ha_idx->pre, sizeof(ha_idx->pre), 1, fp);
+		fwrite(&ha_idx->tot, sizeof(ha_idx->tot), 1, fp);
+		fwrite(&ha_idx->tot_pos, sizeof(ha_idx->tot_pos), 1, fp);
+
+		for (i = 0; i < 1<<ha_idx->pre; ++i) 
+		{
+			g = &(ha_idx->h[i]);
+			yak_pt_save(g->h, fp);
+			fwrite(&g->n, sizeof(g->n), 1, fp);
+			fwrite(g->a, sizeof(ha_idxpos_t), g->n, fp);
+		}
+	}
+
+	fwrite(&opt->number_of_round, sizeof(opt->number_of_round), 1, fp);
+	fwrite(&opt->hom_cov, sizeof(opt->hom_cov), 1, fp);
+	fwrite(&opt->het_cov, sizeof(opt->het_cov), 1, fp);
+	fwrite(&opt->max_n_chain, sizeof(opt->max_n_chain), 1, fp);
+
+
+	write_All_reads(r, gfa_name);
+
+	sprintf(gfa_name, "%s.pt_flt.paf.bin", file_name); 
+	fclose(fp); fp = fopen(gfa_name, "w"); uint64_t k;
+	if (!fp) {
+		free(gfa_name);
+        return 0;
+    }
+	fwrite(&(r->total_reads), sizeof(r->total_reads), 1, fp);
+	for (k = 0; k < r->total_reads; k++) {
+		fwrite(&(r->paf[k].is_fully_corrected), sizeof(r->paf[k].is_fully_corrected), 1, fp);
+        fwrite(&(r->paf[k].is_abnormal), sizeof(r->paf[k].is_abnormal), 1, fp);
+        fwrite(&(r->paf[k].length), sizeof(r->paf[k].length), 1, fp);
+        fwrite(r->paf[k].buffer, sizeof((*(r->paf[k].buffer))), r->paf[k].length, fp);
+	}
+
+	fprintf(stderr, "[M::%s] Index has been written.\n", __func__);
+    free(gfa_name);
+	fclose(fp);
+	return 1;
+}
+
+int load_pt_index(void **r_flt_tab, ha_pt_t **r_ha_idx, All_reads *r, hifiasm_opt_t* opt, char* file_name)
+{
+	char* gfa_name = (char*)malloc(strlen(file_name)+64);
+    sprintf(gfa_name, "%s.pt_flt", file_name);
+    FILE* fp = fopen(gfa_name, "r");
+	if (!fp) {
+		free(gfa_name);
+        return 0;
+    }
+
+	ha_pt_t *ha_idx = NULL;
+	char mode = 0;
+	int f_flag = 0, absent, i;
+	double index_time, index_s_time, pos_time, pos_s_time;
+
+	
+	
+	f_flag += fread(&mode, 1, 1, fp);
+	if(mode == 'f')
+	{
+		index_time = yak_realtime();
+
+		yak_ft_load((yak_ft_t **)r_flt_tab, fp);
+		
+	    f_flag += fread(&mode, 1, 1, fp);
+
+		fprintf(stderr, "[M::%s::%.3f] ==> Loaded flt table\n", __func__, yak_realtime()-index_time);
+	}
+	///insert using multiple threads???
+	if(mode == 'h')
+	{
+		pos_time = index_time = 0;
+
+		CALLOC(ha_idx, 1);
+		ha_pt1_t *g;
+		f_flag += fread(&ha_idx->k, sizeof(ha_idx->k), 1, fp);
+		f_flag += fread(&ha_idx->pre, sizeof(ha_idx->pre), 1, fp);
+		f_flag += fread(&ha_idx->tot, sizeof(ha_idx->tot), 1, fp);
+		f_flag += fread(&ha_idx->tot_pos, sizeof(ha_idx->tot_pos), 1, fp);
+		CALLOC(ha_idx->h, 1<<ha_idx->pre);
+		for (i = 0; i < 1<<ha_idx->pre; ++i) 
+		{
+			index_s_time = yak_realtime();
+
+			g = &(ha_idx->h[i]);
+			yak_pt_load(&(g->h), fp);
+
+			index_time += yak_realtime() - index_s_time;
+			
+			pos_s_time = yak_realtime();
+
+			f_flag += fread(&g->n, sizeof(g->n), 1, fp);
+			MALLOC(g->a, g->n);
+			f_flag += fread(g->a, sizeof(ha_idxpos_t), g->n, fp);
+
+			pos_time += yak_realtime() - pos_s_time;
+		}
+		(*r_ha_idx) = ha_idx;
+
+		fprintf(stderr, "[M::%s::%.3f(index)/%.3f(pos)] ==> Loaded pos table\n", __func__, index_time, pos_time);
+	}
+
+	if(mode != 'h' && mode != 'f')
+	{
+		free(gfa_name);
+		fclose(fp);
+		return 0;
+	}
+
+
+	f_flag += fread(&absent, sizeof(absent), 1, fp);
+	if(absent != opt->number_of_round)
+	{
+		fprintf(stderr, "ERROR: different number of rounds!\n");
+		exit(1);
+	}
+
+	f_flag += fread(&opt->hom_cov, sizeof(opt->hom_cov), 1, fp);
+	f_flag += fread(&opt->het_cov, sizeof(opt->het_cov), 1, fp);
+	f_flag += fread(&opt->max_n_chain, sizeof(opt->max_n_chain), 1, fp);
+
+
+	// fclose(fp);
+	
+	if(!load_All_reads(r, gfa_name))
+	{
+		free(gfa_name);
+		return 0;
+	}
+
+	memset(r->trio_flag, AMBIGU, r->total_reads*sizeof(uint8_t));
+
+	sprintf(gfa_name, "%s.pt_flt.paf.bin", file_name);
+	fclose(fp); fp = fopen(gfa_name, "r"); uint64_t k;
+    if (!fp) {
+        free(gfa_name);
+        return 0;
+    }
+	f_flag += fread(&(r->total_reads), sizeof(r->total_reads), 1, fp);
+	r->paf = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*r->total_reads);
+    r->reverse_paf = (ma_hit_t_alloc*)malloc(sizeof(ma_hit_t_alloc)*r->total_reads);
+	for (k = 0; k < r->total_reads; k++) {
+        // init_ma_hit_t_alloc(&(r->paf[k]));
+        init_ma_hit_t_alloc(&(r->reverse_paf[k]));
+
+		f_flag += fread(&(r->paf[k].is_fully_corrected), sizeof(r->paf[k].is_fully_corrected), 1, fp);
+        f_flag += fread(&(r->paf[k].is_abnormal), sizeof(r->paf[k].is_abnormal), 1, fp);
+        f_flag += fread(&(r->paf[k].length), sizeof(r->paf[k].length), 1, fp);
+        r->paf[k].size = r->paf[k].length;
+
+        r->paf[k].buffer = NULL;
+        if(r->paf[k].length == 0) continue;
+        
+        r->paf[k].buffer = (ma_hit_t*)malloc(sizeof(ma_hit_t)*r->paf[k].length);
+        fread(r->paf[k].buffer, sizeof((*(r->paf[k].buffer))), r->paf[k].length, fp);
+    }
+	fclose(fp);
+
+	fprintf(stderr, "[M::%s] Index has been loaded.\n", __func__);
+
+	free(gfa_name);
+	return 1;
+}
 
 
 
