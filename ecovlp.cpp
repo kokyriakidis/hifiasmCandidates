@@ -701,7 +701,43 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
         }
 
         for (m = 0; m < z->w_list.n; m++) {
-            if(is_ualn_win(z->w_list.a[m])) continue;
+            if(is_ualn_win(z->w_list.a[m])) {
+                // A window that failed to align carries no tokens (clen == 0)
+                // but it DOES carry its coordinates: push_unmap_alnw records
+                // x_start/x_end and y_start/y_end before setting error to
+                // INT16_MAX. hifiasm itself never needs them here because it
+                // emits one ma_hit_t PER WINDOW below, each with its own
+                // qns/qe/ts/te and its own token slice -- so a skipped window
+                // simply produces no record and no record can ever have
+                // coordinates that disagree with its CIGAR.
+                //
+                // The sink path is different: it emits ONE record per overlap,
+                // pairing the whole box with every window's tokens
+                // concatenated. Skipping a failed window there leaves the box
+                // and the token stream describing different spans, with nothing
+                // to say where the hole was, and the result cannot be walked
+                // from q_start/t_start without desynchronising. Consumers had
+                // to detect that and discard the overlap outright (measured:
+                // 0.12% of records at 30k overlaps, 0.48% at 251k -- it scales
+                // the wrong way).
+                //
+                // So emit the hole explicitly, in window order: op 3 consumes
+                // the window's query bases and op 2 its target bases (hifiasm's
+                // frame, transposed at dinara's ingest). That keeps the
+                // concatenated stream spanning the full box and keeps a walk
+                // synchronised, while producing no match or mismatch column --
+                // which is exactly right, since nothing is known about how
+                // these bases align.
+                if (toMem) {
+                    const int64_t uqs = z->w_list.a[m].x_start;
+                    const int64_t uqe = z->w_list.a[m].x_end;
+                    const int64_t uts = z->w_list.a[m].y_start;
+                    const int64_t ute = z->w_list.a[m].y_end;
+                    if (uqe >= uqs) push_trace(&(rr->ec), 3, (uint32_t)(uqe - uqs + 1));
+                    if (ute >= uts) push_trace(&(rr->ec), 2, (uint32_t)(ute - uts + 1));
+                }
+                continue;
+            }
             set_bit_extz_t(ez, (*z), m);
             kv_pushp(ma_hit_t, *rr, &t);
 
@@ -732,7 +768,9 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
             // Whole-overlap CIGAR span: every window's tokens for THIS
             // overlap, concatenated in window order (window-boundary
             // information is not preserved, matching the box-level, not
-            // per-window, granularity of the rest of this record).
+            // per-window, granularity of the rest of this record). Windows that
+            // failed to align contribute explicit unaligned ops above, so the
+            // span always equals the box and the stream is always walkable.
             ov->cig_off = ovCigOff;
             ov->cig_len = uint32_t(rr->ec.n - ovCigOff);
         }
@@ -845,7 +883,9 @@ static void *worker_ov_dbg_pipeline(void *data, int step, void *in) // callback 
         if (toMem) {
             // Per-overlap emission: one sink record per overlap_region, carrying
             // the full box, hifiasm's native dense chain, AND the whole-overlap
-            // CIGAR (every window's tokens concatenated in window order -- see
+            // CIGAR (every window's tokens concatenated in window order, with
+            // explicit unaligned ops standing in for windows that failed to
+            // align, so the stream always spans the whole box -- see
             // worker_hap_ec_dbg_paf). The per-window ma_hit_t records
             // (s->res[k].a) are additionally still built for the file-PAF
             // branch below; the sink path does not consume them.
