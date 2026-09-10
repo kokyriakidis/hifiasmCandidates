@@ -628,6 +628,7 @@ void gen_hc_r_alin_ea(overlap_region_alloc* ol, Candidates_list *cl, All_reads *
 // Defined in candidates.cpp, set by the bridge from
 // hifiasm_ovlp_opt_t::one_alignment_per_pair.
 extern int g_align_pair_once;
+extern int g_min_chain_anchors;
 
 static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
 {
@@ -657,10 +658,20 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
     // structs keeps every buffer reachable, and the pool slots past `length`
     // stay allocated for the next read to reuse. Must run BEFORE
     // fetch_aux_ovlp, which hands back &list[length+1].
-    if (g_align_pair_once) {
+    //
+    // The same pass also drops overlaps whose chain is too SHORT to survive the
+    // caller's own downstream threshold (min_chain_anchors). Chaining is cheap
+    // and base alignment is not, so an overlap that is certain to be rejected
+    // should never reach the aligner. Dropping it also keeps its anchors out of
+    // the marker set, which is the point: see min_chain_anchors in
+    // hifiasm_overlaps.h.
+    if (g_align_pair_once || g_min_chain_anchors > 0) {
         uint64_t sk, sm; overlap_region st;
         for (sk = sm = 0; sk < b->olist.length; sk++) {
-            if ((long)b->olist.list[sk].y_id <= i) continue;
+            if (g_align_pair_once && (long)b->olist.list[sk].y_id <= i) continue;
+            if (g_min_chain_anchors > 0 &&
+                (long)b->olist.list[sk].chain.length < (long)g_min_chain_anchors)
+                continue;
             if (sm != sk) {
                 st = b->olist.list[sm];
                 b->olist.list[sm] = b->olist.list[sk];

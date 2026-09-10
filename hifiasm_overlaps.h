@@ -79,6 +79,27 @@ typedef struct {
      *
      * 0 (default) = hifiasm's own behavior, both directions aligned. */
     int      one_alignment_per_pair;
+    /* Drop a chained overlap outright, before base alignment, when its native
+     * chain holds fewer than this many anchors. 0 (default) keeps everything
+     * chaining produced, which is hifiasm's own behavior.
+     *
+     * This exists so a caller that already rejects short chains downstream can
+     * stop paying to align them. dinara sets it from
+     * Align.minAlignedMarkerCount, the threshold it applies to the chain after
+     * mapping it to marker ordinals -- and that mapping can only DROP anchors
+     * (position lookup, k-mer agreement, then a monotone filter), so a chain
+     * shorter than the threshold can never clear it. Aligning such an overlap
+     * is work whose only possible outcome is rejection.
+     *
+     * Dropping rather than merely skipping the alignment is deliberate: the
+     * overlap's chain anchors also seed markers, and a marker position that
+     * exists only because of an overlap the caller rejects is not wanted
+     * either.
+     *
+     * Measured on dinara's E821 fixture over the 821,592 overlaps offered to
+     * base alignment: chains under 2 anchors are 3.5% of them, under 10 are
+     * 46.0%, under 20 are 54.4%, under 30 are 59.5%. */
+    int      min_chain_anchors;
 } hifiasm_ovlp_opt_t;
 
 /*

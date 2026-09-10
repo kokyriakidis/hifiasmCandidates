@@ -430,6 +430,7 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
     /* Optional filter reuse (mirrors the store path). */
     extern void *g_reuse_flt_tab; extern int g_reuse_hom_cov;
     extern int g_align_pair_once;
+    extern int g_min_chain_anchors;
     if (opt && opt->filter) {
         g_reuse_flt_tab = opt->filter->raw;
         g_reuse_hom_cov = opt->filter->hom_cov;
@@ -437,6 +438,8 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
         g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
     }
     g_align_pair_once = (opt && opt->one_alignment_per_pair) ? 1 : 0;
+    g_min_chain_anchors =
+        (opt && opt->min_chain_anchors > 0) ? opt->min_chain_anchors : 0;
 
     hifiasm_ovlp_sink_begin();
     int ret = ha_detect_candidates();   /* emitters push into the sink */
@@ -446,6 +449,7 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
                           out_cigar, out_cigar_len, NULL, NULL);
 
     g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1; g_align_pair_once = 0;
+    g_min_chain_anchors = 0;
     destory_opt(&asm_opt);
     free(argv);
 
@@ -711,6 +715,7 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
      * the call so it never leaks into a later invocation. */
     extern void *g_reuse_flt_tab; extern int g_reuse_hom_cov;
     extern int g_align_pair_once;
+    extern int g_min_chain_anchors;
     if (opt && opt->filter) {
         g_reuse_flt_tab = opt->filter->raw;
         g_reuse_hom_cov = opt->filter->hom_cov;
@@ -718,6 +723,8 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
         g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
     }
     g_align_pair_once = (opt && opt->one_alignment_per_pair) ? 1 : 0;
+    g_min_chain_anchors =
+        (opt && opt->min_chain_anchors > 0) ? opt->min_chain_anchors : 0;
 
     hifiasm_ovlp_sink_begin();
     int ret = ha_detect_candidates_from_store();  /* leaves R_INF intact */
@@ -725,6 +732,7 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
                           out_cigar, out_cigar_len, out_chain, out_chain_len);
 
     g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1; g_align_pair_once = 0;
+    g_min_chain_anchors = 0;
     destory_opt(&asm_opt);
 
     if (ret != 0) {

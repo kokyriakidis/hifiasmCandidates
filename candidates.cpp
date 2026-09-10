@@ -252,6 +252,11 @@ int g_reuse_hom_cov = -1;
 // behavior, which is what the CLI and the parity test use.
 int g_align_pair_once = 0;
 
+// Set by the bridge from hifiasm_ovlp_opt_t::min_chain_anchors. When nonzero,
+// worker_hap_ec_dbg_paf drops each read's chained overlaps whose native chain
+// is shorter than this, before base alignment. Zero = hifiasm's own behavior.
+int g_min_chain_anchors = 0;
+
 // Post-chaining alignment + filter path (defined in ecovlp.cpp). Runs the same
 // candidate detector as above and then base-level alignment; candidates that
 // fail to align are dropped. Writes <prefix>.ovlp.paf. Only the alignment
