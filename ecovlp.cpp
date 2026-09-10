@@ -625,6 +625,10 @@ void gen_hc_r_alin_ea(overlap_region_alloc* ol, Candidates_list *cl, All_reads *
 
 
 
+// Defined in candidates.cpp, set by the bridge from
+// hifiasm_ovlp_opt_t::one_alignment_per_pair.
+extern int g_align_pair_once;
+
 static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
 {
 	ec_ovec_buf_t0 *b = &(((cal_ec_r_dbg_step_t*)data)->buf->a[tid]);
@@ -638,6 +642,34 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
     recover_UC_Read(&b->self_read, &R_INF, i); 
 
     h_ec_lchain(b->ab, i, b->self_read.seq, b->self_read.length, asm_opt.mz_win, asm_opt.k_mer_length, &R_INF, &b->olist, &b->clist, ((asm_opt.is_ont)?(0.05):(0.02)), asm_opt.max_n_chain, 1, NULL, NULL, &(b->sp), &high_occ, &low_occ, 1, 1, 3, 0.7, 2, 32, COV_W);///ONT high error
+
+    // Align each pair once, not once per direction (opt-in; see
+    // hifiasm_ovlp_opt_t::one_alignment_per_pair). This worker runs per read
+    // and gen_hc_r_alin_ea aligns everything in b->olist, so the pair (i, y)
+    // is aligned here AND again when the worker runs for read y. A caller that
+    // keeps one record per pair pays for both and uses one. Dropping the
+    // y_id <= i half before alignment leaves each pair aligned exactly once,
+    // from the lower-id read; chaining above is untouched, so both directions
+    // are still FOUND, only one is aligned.
+    //
+    // Same swap-and-compact the alignment loop itself uses (gen_hc_r_alin):
+    // each overlap_region carries its own heap buffers, so swapping whole
+    // structs keeps every buffer reachable, and the pool slots past `length`
+    // stay allocated for the next read to reuse. Must run BEFORE
+    // fetch_aux_ovlp, which hands back &list[length+1].
+    if (g_align_pair_once) {
+        uint64_t sk, sm; overlap_region st;
+        for (sk = sm = 0; sk < b->olist.length; sk++) {
+            if ((long)b->olist.list[sk].y_id <= i) continue;
+            if (sm != sk) {
+                st = b->olist.list[sm];
+                b->olist.list[sm] = b->olist.list[sk];
+                b->olist.list[sk] = st;
+            }
+            sm++;
+        }
+        b->olist.length = sm;
+    }
 
     aux_o = fetch_aux_ovlp(&b->olist);///must be here
 

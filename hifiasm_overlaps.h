@@ -54,6 +54,31 @@ typedef struct {
      * correspond to the minimizers being filtered. NULL -> build internally as
      * before. The handle is borrowed (not freed by the overlapper). */
     const hifiasm_filter_t *filter;
+    /* Align each read PAIR once instead of twice.
+     *
+     * Overlap detection is driven per read: for read i, h_ec_lchain finds its
+     * candidates and then the base-level aligner aligns ALL of them. So the
+     * pair (A,B) is aligned once with A as query and again with B as query.
+     * hifiasm needs both -- it is correcting each read against its own
+     * partners -- but a caller that consumes one record per PAIR discards half
+     * of that work.
+     *
+     * With this set, the per-read worker drops the candidates whose target id
+     * is below the query id before aligning, so every pair is aligned exactly
+     * once, from the lower-id read. Chaining is untouched (both directions are
+     * still found); only the alignment is halved.
+     *
+     * Measured on E821 chr12:11-17Mb (8129 ONT reads, 20 threads):
+     * base-level alignment 423.3 -> 210.2 CPU-seconds, overlap detection
+     * 30.5 -> 20.1 s wall. Cost: the 2.9% of pairs that only ONE direction
+     * finds lose the half whose sole direction ran from the higher id --
+     * 274805 -> 271103 candidates (-1.35%), which changed nothing measurable
+     * downstream (markers -0.13%, marker-graph vertices +0.03%, external
+     * anchors +0.11%, het-site precision 99.7% -> 99.6% with 5 MORE truth
+     * variants recovered).
+     *
+     * 0 (default) = hifiasm's own behavior, both directions aligned. */
+    int      one_alignment_per_pair;
 } hifiasm_ovlp_opt_t;
 
 /*

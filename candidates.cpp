@@ -244,6 +244,14 @@ void *g_reuse_flt_tab = NULL;
 // "unknown": fall back to ha_pt_gen's own peak_hom.
 int g_reuse_hom_cov = -1;
 
+// Set by the bridge from hifiasm_ovlp_opt_t::one_alignment_per_pair. When
+// nonzero, worker_hap_ec_dbg_paf drops each read's candidates whose target id
+// is below its own id before base-level alignment, so a pair is aligned once
+// rather than once per direction. See that option's comment in
+// hifiasm_overlaps.h for what it costs and what it saves. Zero = hifiasm's own
+// behavior, which is what the CLI and the parity test use.
+int g_align_pair_once = 0;
+
 // Post-chaining alignment + filter path (defined in ecovlp.cpp). Runs the same
 // candidate detector as above and then base-level alignment; candidates that
 // fail to align are dropped. Writes <prefix>.ovlp.paf. Only the alignment
@@ -363,8 +371,16 @@ static int ha_detect_candidates_impl(int from_store)
         ret = detect_candidates_raw();
     } else {
         cal_ec_r_dbg(asm_opt.thread_num, R_INF.total_reads);
-        fprintf(stderr, "[M::%s] overlaps written to %s.ovlp.paf\n",
-                __func__, asm_opt.output_file_name);
+        // Only the file path writes a PAF; with the in-memory sink active
+        // cal_ec_r_dbg never opens one (sl.fp stays NULL), so claiming a file
+        // was written would be a lie.
+        if (!hifiasm_ovlp_sink_active()) {
+            fprintf(stderr, "[M::%s] overlaps written to %s.ovlp.paf\n",
+                    __func__, asm_opt.output_file_name);
+        } else {
+            fprintf(stderr, "[M::%s] overlaps pushed to the in-memory sink "
+                    "(no PAF written)\n", __func__);
+        }
     }
 
     // Snapshot the read-name table for the in-memory path before R_INF is torn

@@ -428,12 +428,14 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
 
     /* Optional filter reuse (mirrors the store path). */
     extern void *g_reuse_flt_tab; extern int g_reuse_hom_cov;
+    extern int g_align_pair_once;
     if (opt && opt->filter) {
         g_reuse_flt_tab = opt->filter->raw;
         g_reuse_hom_cov = opt->filter->hom_cov;
     } else {
         g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
     }
+    g_align_pair_once = (opt && opt->one_alignment_per_pair) ? 1 : 0;
 
     hifiasm_ovlp_sink_begin();
     int ret = ha_detect_candidates();   /* emitters push into the sink */
@@ -442,7 +444,7 @@ int hifiasm_detect_overlaps_mem(const char *const *read_files,
     hifiasm_ovlp_sink_end(out_ov, out_n_ov, out_names, out_name_off, out_n_reads,
                           out_cigar, out_cigar_len, NULL, NULL);
 
-    g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
+    g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1; g_align_pair_once = 0;
     destory_opt(&asm_opt);
     free(argv);
 
@@ -683,19 +685,21 @@ int hifiasm_detect_overlaps_from_store(const hifiasm_ovlp_opt_t *opt,
      * When NULL the overlapper builds its own filter as before. Cleared after
      * the call so it never leaks into a later invocation. */
     extern void *g_reuse_flt_tab; extern int g_reuse_hom_cov;
+    extern int g_align_pair_once;
     if (opt && opt->filter) {
         g_reuse_flt_tab = opt->filter->raw;
         g_reuse_hom_cov = opt->filter->hom_cov;
     } else {
         g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
     }
+    g_align_pair_once = (opt && opt->one_alignment_per_pair) ? 1 : 0;
 
     hifiasm_ovlp_sink_begin();
     int ret = ha_detect_candidates_from_store();  /* leaves R_INF intact */
     hifiasm_ovlp_sink_end(out_ov, out_n_ov, out_names, out_name_off, out_n_reads,
                           out_cigar, out_cigar_len, out_chain, out_chain_len);
 
-    g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1;
+    g_reuse_flt_tab = NULL; g_reuse_hom_cov = -1; g_align_pair_once = 0;
     destory_opt(&asm_opt);
 
     if (ret != 0) {
