@@ -700,7 +700,35 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
             ovCigOff = rr->ec.n;
         }
 
+        // Where the concatenated sink CIGAR has reached, in the same frames the
+        // box uses: forward query from x_pos_s, alignment-orientation target
+        // from y_pos_s.
+        //
+        // The windows in w_list are NOT guaranteed to tile the box. Emitting a
+        // hole only for windows that exist but failed (below) leaves three
+        // cases uncovered: windows that start after x_pos_s, windows that end
+        // before x_pos_e, and gaps between consecutive windows. Measured on
+        // E821 that was 12 of 188415 overlaps, splitting 2 / 4 / 6 across
+        // exactly those three -- the CIGAR then does not span its box and the
+        // consumer has to discard the overlap. Advancing an explicit cursor and
+        // filling whatever it has not reached makes the invariant hold by
+        // construction rather than by the windows happening to be contiguous.
+        int64_t sinkQ = (int64_t)z->x_pos_s;
+        int64_t sinkT = (int64_t)z->y_pos_s;
+        const int64_t sinkQEnd = (int64_t)z->x_pos_e + 1;
+        const int64_t sinkTEnd = (int64_t)z->y_pos_e + 1;
+
         for (m = 0; m < z->w_list.n; m++) {
+            if (toMem) {
+                // Fill anything between where we are and where this window
+                // starts. op 3 consumes query bases, op 2 target bases.
+                const int64_t wqs = z->w_list.a[m].x_start;
+                const int64_t wts = z->w_list.a[m].y_start;
+                if (wqs > sinkQ) push_trace(&(rr->ec), 3, (uint32_t)(wqs - sinkQ));
+                if (wts > sinkT) push_trace(&(rr->ec), 2, (uint32_t)(wts - sinkT));
+                if (wqs > sinkQ) sinkQ = wqs;
+                if (wts > sinkT) sinkT = wts;
+            }
             if(is_ualn_win(z->w_list.a[m])) {
                 // A window that failed to align carries no tokens (clen == 0)
                 // but it DOES carry its coordinates: push_unmap_alnw records
@@ -735,6 +763,8 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
                     const int64_t ute = z->w_list.a[m].y_end;
                     if (uqe >= uqs) push_trace(&(rr->ec), 3, (uint32_t)(uqe - uqs + 1));
                     if (ute >= uts) push_trace(&(rr->ec), 2, (uint32_t)(ute - uts + 1));
+                    if (uqe + 1 > sinkQ) sinkQ = uqe + 1;
+                    if (ute + 1 > sinkT) sinkT = ute + 1;
                 }
                 continue;
             }
@@ -757,6 +787,15 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
             memcpy(rr->ec.a + rr->ec.n, ez.cigar.a, ez.cigar.n * sizeof((*(rr->ec.a))));
             rr->ec.n += ez.cigar.n;
             t->cc = rr->ec.n - t->bl;
+            if (toMem) {
+                // This window's tokens span its own coordinates.
+                if ((int64_t)z->w_list.a[m].x_end + 1 > sinkQ) {
+                    sinkQ = (int64_t)z->w_list.a[m].x_end + 1;
+                }
+                if ((int64_t)z->w_list.a[m].y_end + 1 > sinkT) {
+                    sinkT = (int64_t)z->w_list.a[m].y_end + 1;
+                }
+            }
 
             if(t->rev) {
                 t->ts = tl - z->w_list.a[m].y_end - 1;
@@ -765,12 +804,21 @@ static void worker_hap_ec_dbg_paf(void *data, long i, int tid)
         }
 
         if (toMem) {
+            // Trailing hole: the last window may end before the box does.
+            if (sinkQEnd > sinkQ) {
+                push_trace(&(rr->ec), 3, (uint32_t)(sinkQEnd - sinkQ));
+            }
+            if (sinkTEnd > sinkT) {
+                push_trace(&(rr->ec), 2, (uint32_t)(sinkTEnd - sinkT));
+            }
+
             // Whole-overlap CIGAR span: every window's tokens for THIS
             // overlap, concatenated in window order (window-boundary
             // information is not preserved, matching the box-level, not
             // per-window, granularity of the rest of this record). Windows that
-            // failed to align contribute explicit unaligned ops above, so the
-            // span always equals the box and the stream is always walkable.
+            // failed to align contribute explicit unaligned ops above, and the
+            // cursor fills any hole before, between or after them, so the span
+            // always equals the box and the stream is always walkable.
             ov->cig_off = ovCigOff;
             ov->cig_len = uint32_t(rr->ec.n - ovCigOff);
         }
