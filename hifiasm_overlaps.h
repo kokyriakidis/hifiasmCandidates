@@ -272,7 +272,10 @@ typedef struct {
  *
  * NOTE: process-global and NOT thread-safe; one loaded store at a time.
  */
-int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads);
+/* `threads`: worker count for the base-packing pass (<=1 runs it serially).
+ * Every write in that pass is indexed by read id, so it parallelises exactly. */
+int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads,
+                             int threads);
 
 /* Free the read store loaded by hifiasm_reads_store_load(). No-op if nothing is
  * loaded. */

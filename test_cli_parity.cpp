@@ -116,7 +116,7 @@ static void run_and_check(const char* fasta, const char* cli_paf,
         hr[i].seq=reads[i].seq.data(); hr[i].seq_len=reads[i].seq.size();
         hr[i].name=reads[i].name.data(); hr[i].name_len=(uint32_t)reads[i].name.size();
     }
-    rc=hifiasm_reads_store_load(hr.data(),hr.size());
+    rc=hifiasm_reads_store_load(hr.data(),hr.size(),/*threads*/1);
     CHECK(rc==0,"store load rc==0");
     hifiasm_overlap_t* sov=0; uint64_t sn=0; char* snm=0; uint64_t* soff=0; uint64_t snr=0;
     rc=hifiasm_detect_overlaps_from_store(&opt,&sov,&sn,&snm,&soff,&snr,NULL,NULL,NULL,NULL);

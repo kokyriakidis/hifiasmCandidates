@@ -176,7 +176,7 @@ int main(void)
         hr[i].name = reads[i].name.data();
         hr[i].name_len = (uint32_t)reads[i].name.size();
     }
-    rc = hifiasm_reads_store_load(hr.data(), hr.size());
+    rc = hifiasm_reads_store_load(hr.data(), hr.size(), /*threads*/ 1);
     CHECK(rc == 0, "store load rc==0");
 
     /* Build a filter from the store (HiFi overlap params: HPC, k=w=51). This

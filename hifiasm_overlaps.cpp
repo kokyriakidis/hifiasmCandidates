@@ -17,6 +17,7 @@
 #include "CommandLines.h"
 #include "Process_Read.h"
 #include "htab.h"
+#include "kthread.h"
 
 /* Defined in candidates.cpp (C++ linkage): runs index build + candidate
  * detection and, unless asm_opt.dbg_ovec_cal is set, the alignment/filter
@@ -505,7 +506,38 @@ void hifiasm_overlaps_mem_free(hifiasm_overlap_t *ov,
  * clobber an already-loaded store. */
 static int g_store_loaded = 0;
 
-int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads)
+/* Pass-2 payload: pack one read's bases and copy its name. Every write is
+ * indexed by the read id -- Get_READ() is R_INF.read_sperate[id], one separate
+ * allocation per read, and N_site[id] / name[name_index[id]] are likewise
+ * per-read -- so reads can be packed concurrently with no sharing at all. */
+typedef struct {
+    const hifiasm_read_t *reads;
+} store_fill_t;
+
+static void store_fill_worker(void *data, long i, int tid)
+{
+    (void)tid;
+    const hifiasm_read_t *reads = ((store_fill_t*)data)->reads;
+    const char *seq = reads[i].seq;
+    const uint64_t sl = reads[i].seq_len;
+
+    /* Count ambiguous (non-ACGT) bases exactly as the file path does, so
+     * ha_compress_base allocates N_site[i] to the right size. */
+    uint64_t n_N = 0;
+    for (uint64_t j = 0; j < sl; ++j)
+        if (seq_nt4_table[(uint8_t)seq[j]] >= 4) ++n_N;
+
+    /* ha_compress_base takes a non-const char*; it only reads src. */
+    ha_compress_base(Get_READ(R_INF, i), (char*)seq, sl,
+                     &R_INF.N_site[i], n_N);
+
+    if (reads[i].name_len)
+        memcpy(&R_INF.name[R_INF.name_index[i]],
+               reads[i].name, reads[i].name_len);
+}
+
+int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads,
+                             int threads)
 {
     if (reads == NULL || n_reads == 0) {
         fprintf(stderr, "[hifiasm_reads_store_load] invalid arguments\n");
@@ -554,25 +586,18 @@ int hifiasm_reads_store_load(const hifiasm_read_t *reads, uint64_t n_reads)
 
     /* pass 2: allocate per-read arrays sized from pass 1, then fill bases and
      * names. malloc_All_reads() consults asm_opt.is_sc for the optional quality
-     * store; the bridge never sets it, so no rsc is allocated. */
+     * store; the bridge never sets it, so no rsc is allocated.
+     *
+     * Run in parallel: this is one ha_compress_base per read over the whole
+     * input (284M bases on dinara's E821 fixture, ~314 ms single-threaded) and
+     * every write is per-read disjoint. Pass 1 stays serial -- it only appends
+     * lengths, and ha_insert_read_len grows shared arrays. */
     malloc_All_reads(&R_INF);
-    for (uint64_t i = 0; i < n_reads; ++i) {
-        const char *seq = reads[i].seq;
-        uint64_t    sl  = reads[i].seq_len;
-
-        /* Count ambiguous (non-ACGT) bases exactly as the file path does, so
-         * ha_compress_base allocates N_site[i] to the right size. */
-        uint64_t n_N = 0;
-        for (uint64_t j = 0; j < sl; ++j)
-            if (seq_nt4_table[(uint8_t)seq[j]] >= 4) ++n_N;
-
-        /* ha_compress_base takes a non-const char*; it only reads src. */
-        ha_compress_base(Get_READ(R_INF, i), (char*)seq, sl,
-                         &R_INF.N_site[i], n_N);
-
-        if (reads[i].name_len)
-            memcpy(&R_INF.name[R_INF.name_index[i]],
-                   reads[i].name, reads[i].name_len);
+    {
+        store_fill_t fill;
+        fill.reads = reads;
+        kt_for(threads > 0 ? threads : 1, store_fill_worker, &fill,
+               (long)n_reads);
     }
 
     g_store_loaded = 1;
